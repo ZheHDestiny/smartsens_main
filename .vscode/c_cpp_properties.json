@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "A1_ARM_Buildroot",
+            "includePath": [
+                "${workspaceFolder}/ssne_ai_demo/common/include",
+                "${workspaceFolder}/../../../../output/opt/m1_sdk/usr/include",
+                "${workspaceFolder}/../../../../output/opt/m1_sdk/usr/include/smartsoc"
+            ],
+            "defines": [],
+            "compilerPath": "${workspaceFolder}/../../../toolchain/glibc-ssp-cpp/arm-smartsens-linux-gnueabihf_sdk-buildroot/usr/bin/arm-linux-g++",
+            "cStandard": "c11",
+            "cppStandard": "c++11",
+            "intelliSenseMode": "linux-gcc-arm",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/ssne_ai_demo",
+                    "${workspaceFolder}/../../../../output/opt/m1_sdk/usr/include"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

@@ -10,6 +10,8 @@
 #include <cmath>
 #include "log.hpp"
 
+std::atomic<bool> g_signal_received{false};
+
 using namespace fdevice;
 using OsdQR = sst::device::osd::OsdQuadRangle;
 
@@ -43,13 +45,12 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape, const std::string&
     
     if (!enabled_) {
         std::cerr << "[VISUALIZER] Warning: OSD device not enabled or initialization failed." << std::endl;
-    } else {
-        printf("[VISUALIZER] Initialized: %d x %d\n", m_width, m_height);
     }
 }
 
 void VISUALIZER::Release() {
     if (enabled_) osd_device.Release();
+    enabled_ = false;
 }
 
 void VISUALIZER::Clear() {

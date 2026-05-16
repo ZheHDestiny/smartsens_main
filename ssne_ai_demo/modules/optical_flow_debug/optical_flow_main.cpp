@@ -50,20 +50,24 @@ static void keyboard_listener() {
     printf("[键盘监听] 线程已启动，等待用户输入...\n\n");
 
     while (true) {
-        cin >> input;
-
-        lock_guard<mutex> lock(g_mtx);
-        
-        if (input == "q" || input == "Q") {
-            g_exit_flag = true;
-            printf("\n[键盘监听] ✓ 检测到退出指令 (q)，通知业务线程退出...\n");
-            break;
-        } 
-        else if (input == "p" || input == "P") {
-            g_pause_flag = !g_pause_flag;
+        {
+            lock_guard<mutex> lock(g_mtx);
+            if (g_exit_flag || g_signal_received.load()) break;
         }
-        else {
-            printf("[键盘监听]  无效指令: '%s' (仅支持 p/P 或 q/Q)\n", input.c_str());
+        if (nonblocking_getline(input, 100)) {
+            lock_guard<mutex> lock(g_mtx);
+            if (g_exit_flag || g_signal_received.load()) break;
+            if (input == "q" || input == "Q") {
+                g_exit_flag = true;
+                printf("\n[键盘监听] ✓ 检测到退出指令 (q)，通知业务线程退出...\n");
+                break;
+            }
+            else if (input == "p" || input == "P") {
+                g_pause_flag = !g_pause_flag;
+            }
+            else {
+                printf("[键盘监听]  无效指令: '%s' (仅支持 p/P 或 q/Q)\n", input.c_str());
+            }
         }
     }
 }
@@ -89,6 +93,8 @@ int run_optical_flow_debug() {
         g_pause_flag = false;
     }
 
+    clear_stdin_residual();
+
     printf("\n");
     printf("═══════════════════════════════════════════════════════════\n");
     printf("     SmartSens 光流障碍物避障系统\n");
@@ -106,10 +112,13 @@ int run_optical_flow_debug() {
     bool ssne_ok = false;
     IMAGEPROCESSOR image_processor;
     
-    if (ssne_initial() != 0) {
-        fprintf(stderr, "[WARN] ssne_initial() failed!\n");
-    } else {
-        ssne_ok = true;
+    {
+        SigintBlocker blocker;
+        if (ssne_initial() != 0) {
+            fprintf(stderr, "[WARN] ssne_initial() failed!\n");
+        } else {
+            ssne_ok = true;
+        }
     }
 
     image_processor.Initialize(&img_shape, 0, 720, 370, 910, 720, 540);
@@ -177,8 +186,11 @@ int run_optical_flow_debug() {
 
     thread listener_thread(keyboard_listener);
 
-    while (!check_exit_flag()) {
-        
+    {
+        SigintBlocker blocker;
+        while (!check_exit_flag()) {
+        if (g_signal_received.load()) break;
+
         if (check_pause_flag()) {
             auto pause_enter_time = std::chrono::steady_clock::now();
             
@@ -308,6 +320,8 @@ int run_optical_flow_debug() {
 
     printf("\n[释放] 清理资源\n");
 
+    }
+
     if (listener_thread.joinable()) {
         listener_thread.join();
     }
@@ -318,9 +332,13 @@ int run_optical_flow_debug() {
     
     visualizer.Release();
 
-    if (ssne_ok) {
-        ssne_release();
+    {
+        SigintBlocker blocker;
+        if (ssne_ok) {
+            ssne_release();
+        }
     }
+    usleep(500000);
 
     printf("\n════════════════════════════════════════════════════════════\n");
     printf("     光流检测结束，返回主菜单\n");

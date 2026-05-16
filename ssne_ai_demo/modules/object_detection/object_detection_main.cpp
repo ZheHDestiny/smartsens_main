@@ -11,7 +11,7 @@
 #include <mutex>
 #include <unistd.h>
 #include "common.hpp"
-#include "utils.hpp" 
+#include "utils.hpp"
 
 using namespace std;
 
@@ -20,16 +20,19 @@ static std::mutex g_mtx;
 
 static void keyboard_listener() {
     std::string input;
-    std::cout << "键盘监听线程已启动，输入 'q' 退出目标检测并返回主菜单..." << std::endl;
+    std::cout << "按 'q' 退出目标检测" << std::endl;
     while (true) {
-        std::cin >> input;
-        std::lock_guard<std::mutex> lock(g_mtx);
-        if (input == "q" || input == "Q") {
-            g_exit_flag = true;
-            std::cout << "检测到退出指令，通知业务线程退出..." << std::endl;
-            break;
-        } else {
-            std::cout << "输入无效（仅 'q' 有效），请重新输入：" << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            if (g_exit_flag || g_signal_received.load()) break;
+        }
+        if (nonblocking_getline(input, 100)) {
+            std::lock_guard<std::mutex> lock(g_mtx);
+            if (g_exit_flag || g_signal_received.load()) break;
+            if (input == "q" || input == "Q") {
+                g_exit_flag = true;
+                break;
+            }
         }
     }
 }
@@ -41,7 +44,7 @@ static std::map<int, std::string> LoadClassNames(const std::string& path) {
         std::cerr << "[WARNING] Failed to open cls.yaml at: " << path << std::endl;
         return class_names;
     }
-    
+
     std::string line;
     while (std::getline(file, line)) {
         auto colon_pos = line.find(':');
@@ -56,32 +59,33 @@ static std::map<int, std::string> LoadClassNames(const std::string& path) {
     return class_names;
 }
 
-/**
- * @brief 目标检测程序入口
- * 【适配修改】：将 main 改为 run_object_detection 供顶级 main.cpp 调用
- */
 int run_object_detection() {
     {
         std::lock_guard<std::mutex> lock(g_mtx);
         g_exit_flag = false;
     }
 
-    int img_width = 720;    
-    int img_height = 1280;  
+    clear_stdin_residual();
 
-    array<int, 2> det_shape = {640, 480};  // YOLOv8 标准输入
-    string path_det = "./app_assets/models/yolov8n_object_detection.m1model"; 
+    int img_width = 720;
+    int img_height = 1280;
 
-    if (ssne_initial()) {
-        fprintf(stderr, "SSNE initialization failed!\n");
-        return -1;
+    array<int, 2> det_shape = {640, 480};
+    string path_det = "./app_assets/models/yolov8n_object_detection.m1model";
+
+    {
+        SigintBlocker blocker;
+        if (ssne_initial()) {
+            fprintf(stderr, "SSNE initialization failed!\n");
+            return -1;
+        }
     }
 
     std::map<int, std::string> class_names = LoadClassNames("./app_assets/cls.yaml");
 
-    array<int, 2> img_shape = {img_width, img_height};  
-    array<int, 2> crop_shape = {720, 540}; // 裁剪为正方形
-    const int crop_offset_y = 370;  // Y轴裁剪偏移：(1280-720)/2
+    array<int, 2> img_shape = {img_width, img_height};
+    array<int, 2> crop_shape = {720, 540};
+    const int crop_offset_y = 370;
 
     IMAGEPROCESSOR processor;
     processor.Initialize(&img_shape, 0, 720, 0, 1280, 720, 1280);
@@ -95,8 +99,13 @@ int run_object_detection() {
 
     std::thread listener_thread(keyboard_listener);
     ssne_tensor_t img_sensor;
+    memset(&img_sensor, 0, sizeof(img_sensor));
 
-    while (true) {
+    {
+        SigintBlocker blocker;
+        while (true) {
+        if (g_signal_received.load()) break;
+
         bool current_exit = false;
         {
             std::lock_guard<std::mutex> lock(g_mtx);
@@ -105,7 +114,7 @@ int run_object_detection() {
         if(current_exit) break;
 
         processor.GetImage(&img_sensor);
-        
+
         if (img_sensor.data == nullptr) {
             usleep(10000);
             continue;
@@ -119,9 +128,8 @@ int run_object_detection() {
             std::vector<int> display_class_ids;
 
             for (size_t i = 0; i < det_result.boxes.size(); i++) {
-                
-                float pad_x = 185.0f; 
-                float scale = 1280.0f / 480.0f; // 缩放倍数 2.6666...
+                float pad_x = 185.0f;
+                float scale = 1280.0f / 480.0f;
 
                 float x1_orig = (det_result.boxes[i][0] - pad_x) * scale;
                 float y1_orig = det_result.boxes[i][1] * scale;
@@ -133,6 +141,11 @@ int run_object_detection() {
                 x2_orig = std::max(0.0f, std::min(x2_orig, 720.0f));
                 y2_orig = std::max(0.0f, std::min(y2_orig, 1280.0f));
 
+                if (x1_orig < 0 || y1_orig < 0 || x2_orig > img_width || y2_orig > img_height ||
+                    x1_orig >= x2_orig || y1_orig >= y2_orig ||
+                    std::isnan(x1_orig) || std::isnan(y1_orig) || std::isnan(x2_orig) || std::isnan(y2_orig)) {
+                    continue;
+                }
                 boxes_original_coord.push_back({x1_orig, y1_orig, x2_orig, y2_orig});
                 display_scores.push_back(det_result.scores[i]);
                 display_class_ids.push_back(det_result.class_ids[i]);
@@ -150,16 +163,22 @@ int run_object_detection() {
         }
     }
 
+    }
+
     if (listener_thread.joinable()) listener_thread.join();
 
     detector.Release();
     processor.Release();
     visualizer.Release();
-    
-    if (ssne_release()) {
-        fprintf(stderr, "SSNE release failed!\n");
-        return -1;
-    }
 
-    return 0; // 成功退出，返回主菜单
+    {
+        SigintBlocker blocker;
+        if (ssne_release()) {
+            fprintf(stderr, "SSNE release failed!\n");
+            return -1;
+        }
+    }
+    usleep(500000);
+
+    return 0;
 }

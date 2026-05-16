@@ -21,6 +21,7 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
                                 uint16_t crop_x1, uint16_t crop_x2, 
                                 uint16_t crop_y1, uint16_t crop_y2,
                                 uint16_t out_w, uint16_t out_h) {
+    SigintBlocker sig_blocker;
     img_shape = *in_img_shape;
     format_online = SSNE_Y_8; 
     OnlineSetCrop(kPipeline0, crop_x1, crop_x2, crop_y1, crop_y2);
@@ -30,8 +31,6 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
         printf("[ERROR] Failed to open online pipeline! ret: %d\n", res0);
         return;
     }
-    printf("[INFO] Pipeline0 opened successfully: Crop(%d,%d,%d,%d), Out(%dx%d)\n", 
-           crop_x1, crop_x2, crop_y1, crop_y2, out_w, out_h);
 }
 
 /**
@@ -52,6 +51,6 @@ void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
  * @brief 释放图像处理器资源，关闭 pipeline
  */
 void IMAGEPROCESSOR::Release() {
+    SigintBlocker sig_blocker;
     CloseOnlinePipeline(kPipeline0);
-    printf("[INFO] OnlinePipe closed!\n");
 }

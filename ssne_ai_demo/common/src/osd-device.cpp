@@ -20,21 +20,26 @@ namespace osd{
 
 OsdDevice::OsdDevice()
     : m_height(0), m_width(0) {
+    memset(m_layer_dma, 0, sizeof(m_layer_dma));
 }
 
 OsdDevice::~OsdDevice() {
-    std::cout << "OsdDevice Destructor" << std::endl;
 }
 
 void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
+    SigintBlocker sig_blocker;
+    if (m_osd_enabled) {
+        Release();
+    }
+    if (m_pcolor_lut != nullptr) {
+        delete[] m_pcolor_lut;
+        m_pcolor_lut = nullptr;
+    }
     m_width = width;
     m_height = height;
 
     if (bitmap_lut_path != nullptr && strlen(bitmap_lut_path) > 0) {
-        if (LoadLutFile(bitmap_lut_path) == 0) {
-            std::cout << "[OsdDevice] Using provided LUT: " << bitmap_lut_path << std::endl;
-        } else {
-            std::cerr << "[OsdDevice] Warning: Failed to load provided LUT, using default" << std::endl;
+        if (LoadLutFile(bitmap_lut_path) != 0) {
             LoadLutFile(m_osd_lut_path.c_str());
         }
     } else {
@@ -102,17 +107,20 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
 }
 
 void OsdDevice::Release() {
-    std::cout << "OsdDevice Release" << std::endl;
-
+    SigintBlocker sig_blocker;
     for(int i = 0; i < OSD_LAYER_SIZE; i++){
         if (m_layer_created[i]) {
             osd_destroy_layer(m_osd_handle, (ssLAYER_HANDLE)i);
             m_layer_created[i] = false;
         }
-        if(m_layer_dma[i].dma != nullptr)
+        if(m_layer_dma[i].dma != nullptr) {
             osd_delete_buffer(m_osd_handle, m_layer_dma[i].dma);
-        if(m_layer_dma[i].dma_2 != nullptr)
+            m_layer_dma[i].dma = nullptr;
+        }
+        if(m_layer_dma[i].dma_2 != nullptr) {
             osd_delete_buffer(m_osd_handle, m_layer_dma[i].dma_2);
+            m_layer_dma[i].dma_2 = nullptr;
+        }
     }
 
     if(m_pcolor_lut != nullptr){
@@ -124,6 +132,8 @@ void OsdDevice::Release() {
         osd_close_device(m_osd_handle);
         m_osd_enabled = false;
     }
+    m_osd_handle = 0; // 重置为无效句柄，防止 dangling handle
+    usleep(300000); // 等待驱动完成资源清理
 }
 
 int OsdDevice::LoadLutFile(const char* filename){
@@ -203,7 +213,7 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id){
     osd_flush_quad_rangle_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id);
 }
 
-void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int layer_id, tagQUADRANGLETYPE type, tagALPHATYPE alpha, int color){
+void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int layer_id, fdevice::QUADRANGLETYPE type, fdevice::ALPHATYPE alpha, int color){
     if (!m_osd_enabled) return;
     if (boxes.empty()){
         osd_clean_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id);
@@ -220,6 +230,14 @@ void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int l
 
 void OsdDevice::DrawTexture(const char* bitmap_path, const char* lut_path, int layer_id, int pos_x, int pos_y, fdevice::ALPHATYPE alpha) {
     if (!m_osd_enabled) return;
+    if (layer_id < 0 || layer_id >= OSD_LAYER_SIZE || !m_layer_created[layer_id]) {
+        std::cerr << "[OsdDevice] ERROR: Layer " << layer_id << " not created, skipping DrawTexture." << std::endl;
+        return;
+    }
+    if (bitmap_path == nullptr || access(bitmap_path, F_OK) != 0) {
+        std::cerr << "[OsdDevice] ERROR: Bitmap file not found: " << (bitmap_path ? bitmap_path : "null") << std::endl;
+        return;
+    }
 
     fdevice::BITMAP_INFO_S bm_info;
     bm_info.pSSbmpFile = bitmap_path;

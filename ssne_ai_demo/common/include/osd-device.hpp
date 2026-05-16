@@ -103,7 +103,7 @@ private:
     void GenQrangleBox(std::array<float, 4>& det, int border);
 
 private:
-    handle_t m_osd_handle;
+    handle_t m_osd_handle = 0;
     std::string m_osd_lut_path = "./app_assets/colorLUT.sscl";
     uint8_t *m_pcolor_lut = nullptr;
     int m_file_size = 0;

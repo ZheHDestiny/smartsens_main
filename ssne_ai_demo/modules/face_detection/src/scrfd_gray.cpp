@@ -339,15 +339,10 @@ void SCRFDGRAY::Initialize(std::string& model_path, std::array<int, 2>* in_img_s
     uint32_t det_width = static_cast<uint32_t>(det_shape[0]);
     uint32_t det_height = static_cast<uint32_t>(det_shape[1]);
     inputs[0] = create_tensor(det_width, det_height, SSNE_Y_8, SSNE_BUF_AI);
+    memset(outputs, 0, sizeof(outputs));
 }
 
 
-
-int save_tensor_buffer(ssne_tensor_t tensor, const char* filepath);
-
-static ssne_tensor_t g_last_img;
-static ssne_tensor_t g_last_pipe_input;
-static bool g_has_frame = false;
 
 /**
  * @brief 执行人脸检测预测
@@ -359,22 +354,31 @@ static bool g_has_frame = false;
 void SCRFDGRAY::Predict(ssne_tensor_t* img, FaceDetectionResult* result, float conf_threshold) {
     int ret = RunAiPreprocessPipe(pipe_offline, *img, inputs[0]);
     if (ret != 0) {
-        printf("[ERROR] Failed to run AI preprocess pipe!\n");
-        printf("ret: %d\n", ret);
+        result->Clear();
         return;
     }
 
-    g_last_img = *img;
-    g_last_pipe_input = inputs[0];
-    g_has_frame = true;
-    
-    if (ssne_inference(model_id, 1, inputs))
-    {
-        fprintf(stderr, "ssne inference fail!\n");
+    if (ssne_inference(model_id, 1, inputs)) {
+        fprintf(stderr, "[ERROR] SCRFD ssne_inference failed!\n");
+        result->Clear();
+        return;
     }
 
-    ssne_getoutput(model_id, 6, outputs);
-    
+    int getout_ret = ssne_getoutput(model_id, 6, outputs);
+    if (getout_ret != 0) {
+        fprintf(stderr, "[ERROR] ssne_getoutput failed! ret=%d\n", getout_ret);
+        result->Clear();
+        return;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        if (get_data(outputs[i]) == nullptr) {
+            fprintf(stderr, "[ERROR] ssne_getoutput returned null data for output %d\n", i);
+            result->Clear();
+            return;
+        }
+    }
+
     std::vector<std::array<float, 4>> bboxes;
     std::vector<float> scores;
     std::array<float, 4> tmp_bbox;
@@ -439,49 +443,10 @@ void SCRFDGRAY::Predict(ssne_tensor_t* img, FaceDetectionResult* result, float c
  * @brief 释放资源
  * @description 释放所有tensor、预处理管道和计时器资源
  */
-void SCRFDGRAY::Release()
-{   
-    if (g_has_frame) {
-        printf("[INFO] Saving last frame images...\n");
-        save_tensor(g_last_img, "dbg_in.raw");
-        save_tensor(g_last_pipe_input, "dbg_in_pipe.raw");
-        printf("[INFO] Last frame saved successfully!\n");
-    }
-
+void SCRFDGRAY::Release() {
     release_tensor(inputs[0]);
-    release_tensor(outputs[0]);
-    release_tensor(outputs[1]);
-    release_tensor(outputs[2]);
-    release_tensor(outputs[3]);
-    release_tensor(outputs[4]);
-    release_tensor(outputs[5]);
+    for (int i = 0; i < 6; i++) {
+        outputs[i].data = nullptr;
+    }
     ReleaseAIPreprocessPipe(pipe_offline);
-}
-
-/* debug */
-void SCRFDGRAY::saveImageBin(const void* data, int w, int h, const char* filename) {
-    FILE* file = fopen(filename, "wb");
-    if (file != nullptr) {
-        fwrite(&w, sizeof(int), 1, file);      // 写入宽度
-        fwrite(&h, sizeof(int), 1, file);      // 写入高度
-        fwrite(data, sizeof(char), w * h, file);  // 写入图像数据
-        fclose(file);
-        std::cout << "write file " << filename << " successfully!" << std::endl;
-    }
-    else {
-        std::cerr << "failed to write " << filename << std::endl;
-    }
-}
-/* debug */
-void SCRFDGRAY::saveFloatBin(const float* data, int length, const char* filename) {
-    FILE* file = fopen(filename, "wb");
-    if (file != nullptr) {
-        fwrite(&length, sizeof(int), 1, file);        // 写入数组长度
-        fwrite(data, sizeof(float), length, file);     // 写入浮点数据
-        fclose(file);
-        std::cout << "write file " << filename << " successfully!" << std::endl;
-    }
-    else {
-        std::cerr << "failed to write " << filename << std::endl;
-    }
 }

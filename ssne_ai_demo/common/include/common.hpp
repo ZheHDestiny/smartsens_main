@@ -11,6 +11,13 @@
 #include <string>
 #include <math.h>
 #include <cstring>
+#include <atomic>
+#include <csignal>
+#include <sys/select.h>
+#include <unistd.h>
+#include <iostream>
+#include <limits>
+#include <termios.h>
 #include "smartsoc/ssne_api.h"
 
 class IMAGEPROCESSOR {
@@ -493,4 +500,48 @@ private:
     bool has_prev_frame = false; int frame_pixels = 0;
     HandGestureTemporalBuffer temporal_buffer;
     void RunSingleFrameInference(ssne_tensor_t* img, float out_probs[6], bool use_clahe);
+};
+
+extern std::atomic<bool> g_signal_received;
+
+inline void setup_signal_handlers() {
+    auto handler = [](int) { g_signal_received.store(true); };
+    std::signal(SIGINT, handler);
+    std::signal(SIGTERM, handler);
+}
+
+inline bool nonblocking_getline(std::string& out, int timeout_ms) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    struct timeval tv = {timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+
+    int ret = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
+    if (ret > 0) {
+        if (std::getline(std::cin, out)) {
+            if (!out.empty() && out.back() == '\r') out.pop_back();
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void clear_stdin_residual() {
+    std::cin.clear();
+    tcflush(STDIN_FILENO, TCIFLUSH);
+}
+
+class SigintBlocker {
+    sigset_t old_mask_;
+public:
+    SigintBlocker() {
+        sigset_t new_mask;
+        sigemptyset(&new_mask);
+        sigaddset(&new_mask, SIGINT);
+        sigaddset(&new_mask, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &new_mask, &old_mask_);
+    }
+    ~SigintBlocker() {
+        pthread_sigmask(SIG_SETMASK, &old_mask_, nullptr);
+    }
 };

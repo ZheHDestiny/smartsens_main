@@ -53,18 +53,17 @@ void RPSCLASSIFIER::RunSingleFrameInference(ssne_tensor_t* img, float out_probs[
         for (int i = 0; i < 4; i++) out_probs[i] = 0.25f;
         return;
     }
-    static int save_count = 0;
-    if (save_count < 200) {
-        char fname[64];
-        snprintf(fname, sizeof(fname), "dbg_model_%03d.bin", save_count);
-        save_tensor(inputs[0], fname);
-        save_count++;
-    }
     if (ssne_inference(model_id, 1, inputs)) {
+        fprintf(stderr, "[ERROR] RPS ssne_inference failed!\n");
         for (int i = 0; i < 4; i++) out_probs[i] = 0.25f;
         return;
     }
-    ssne_getoutput(model_id, 1, outputs);
+    int getout_ret = ssne_getoutput(model_id, 1, outputs);
+    if (getout_ret != 0 || get_data(outputs[0]) == nullptr) {
+        fprintf(stderr, "[ERROR] RPS ssne_getoutput failed! ret=%d\n", getout_ret);
+        for (int i = 0; i < 4; i++) out_probs[i] = 0.25f;
+        return;
+    }
     const float* raw = static_cast<const float*>(get_data(outputs[0]));
     float max_v = raw[0];
     for (int i = 1; i < 4; i++) if (raw[i] > max_v) max_v = raw[i];
@@ -115,9 +114,8 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
             voted_conf = current_confidence;
         }
         locked_prediction = voted;
-        printf("[RPS] WIND_UP → PREDICTED: human=%s (conf=%.2f)\n",
+        printf("[RPS] WIND_UP -> PREDICTED: human=%s (conf=%.2f)\n",
                GESTURE_NAMES[static_cast<int>(voted)], voted_conf);
-
         game_state        = GameState::PREDICTED;
         state_frame_count = 0;
 
@@ -137,7 +135,7 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
         result->is_locked     = true;
 
         if (state_frame_count >= DISPLAY_HOLD_FRAMES) {
-            printf("[RPS] PREDICTED → DISPLAY\n");
+            printf("[RPS] PREDICTED -> DISPLAY\n");
             game_state        = GameState::DISPLAY;
             state_frame_count = 0;
         }
@@ -153,7 +151,7 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
 
         int idle_streak = temporal_buffer.ConsecutiveIdle(IDLE_RESET_FRAMES);
         if (idle_streak >= IDLE_RESET_FRAMES) {
-            printf("[RPS] DISPLAY → IDLE (player reset hand)\n");
+            printf("[RPS] DISPLAY -> IDLE (player reset hand)\n");
             game_state        = GameState::IDLE;
             state_frame_count = 0;
             locked_prediction = GestureClass::IDLE;
@@ -192,8 +190,7 @@ void RPSCLASSIFIER::Initialize(std::string&        model_path,
     inputs[0] = create_tensor(mw, mh, SSNE_Y_8, SSNE_BUF_AI);
 
     memset(&outputs[0], 0, sizeof(ssne_tensor_t));
-
-    printf("[RPSCLASSIFIER] Initialized: crop=%dx%d → model=%dx%d\n",
+    printf("[RPSCLASSIFIER] Initialized: crop=%dx%d -> model=%dx%d\n",
            img_shape[0], img_shape[1], model_shape[0], model_shape[1]);
 }
 
@@ -220,8 +217,9 @@ void RPSCLASSIFIER::Release() {
 
     release_tensor(inputs[0]);
 
-    if (get_data(outputs[0]) != nullptr)
-        release_tensor(outputs[0]);
+    // NOTE: outputs[0] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
+    // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
+    outputs[0].data = nullptr;
 
     ReleaseAIPreprocessPipe(pipe_offline);
     printf("[RPSCLASSIFIER] Resources released.\n");

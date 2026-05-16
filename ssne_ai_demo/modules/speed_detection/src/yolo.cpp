@@ -37,6 +37,7 @@ void YOLOV8_SPEED::Initialize(const std::string& model_path, std::array<int, 2>*
     SetNormalize(pipe_offline, model_id); 
     
     inputs[0] = create_tensor(det_shape[0], det_shape[1], SSNE_Y_8, SSNE_BUF_AI);
+    memset(outputs, 0, sizeof(outputs));
     
     if (!get_data(inputs[0])) {
         fprintf(stderr, "[FATAL] YOLOV8_SPEED::Initialize - OCM Memory is FULL! Failed to allocate inputs[0].\n");
@@ -160,14 +161,30 @@ void YOLOV8_SPEED::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, fl
     if (!src_data) return;
     int ret = RunAiPreprocessPipe(pipe_offline, *img, inputs[0]);
     if (ret != 0) {
-        printf("[ERROR] Hardware Preprocess Failed!\n");
+        result->Clear();
         return;
     }
 
     ret = ssne_inference(model_id, 1, inputs);
-    if (ret) return;
+    if (ret) {
+        result->Clear();
+        return;
+    }
 
-    ssne_getoutput(model_id, 6, outputs);
+    int getout_ret = ssne_getoutput(model_id, 6, outputs);
+    if (getout_ret != 0) {
+        fprintf(stderr, "[ERROR] ssne_getoutput failed! ret=%d\n", getout_ret);
+        result->Clear();
+        return;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        if (get_data(outputs[i]) == nullptr) {
+            fprintf(stderr, "[ERROR] ssne_getoutput returned null data for output %d\n", i);
+            result->Clear();
+            return;
+        }
+    }
 
     std::vector<std::array<float, 4>> boxes;
     std::vector<float> scores;
@@ -190,6 +207,10 @@ void YOLOV8_SPEED::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, fl
 
 void YOLOV8_SPEED::Release() {
     release_tensor(inputs[0]);
-    for(int i=0; i<6; i++) release_tensor(outputs[i]);
+    // NOTE: outputs[i] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
+    // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
+    for(int i=0; i<6; i++) {
+        outputs[i].data = nullptr;
+    }
     ReleaseAIPreprocessPipe(pipe_offline);
 }

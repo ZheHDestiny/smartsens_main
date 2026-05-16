@@ -14,18 +14,22 @@
 void EMOTIONCLASSIFIER::RunSingleFrameInference(ssne_tensor_t* img, float out_probs[4]) {
     int ret = RunAiPreprocessPipe(pipe_offline, *img, inputs[0]);
     if (ret != 0) {
-        printf("[ERROR] EMOTIONCLASSIFIER: AI preprocess pipe failed (ret=%d)\n", ret);
         for (int i = 0; i < 4; i++) out_probs[i] = 1.0f / 4.0f;
         return;
     }
 
     if (ssne_inference(model_id, 1, inputs)) {
-        fprintf(stderr, "[ERROR] EMOTIONCLASSIFIER: ssne_inference failed!\n");
+        fprintf(stderr, "[ERROR] EMOTION ssne_inference failed!\n");
         for (int i = 0; i < 4; i++) out_probs[i] = 1.0f / 4.0f;
         return;
     }
 
-    ssne_getoutput(model_id, 1, outputs);
+    int getout_ret = ssne_getoutput(model_id, 1, outputs);
+    if (getout_ret != 0 || get_data(outputs[0]) == nullptr) {
+        fprintf(stderr, "[ERROR] EMOTION ssne_getoutput failed! ret=%d\n", getout_ret);
+        for (int i = 0; i < 4; i++) out_probs[i] = 1.0f / 4.0f;
+        return;
+    }
     const float* raw = static_cast<const float*>(get_data(outputs[0]));
 
     float max_v = raw[0];
@@ -60,8 +64,7 @@ void EMOTIONCLASSIFIER::Initialize(std::string& model_path, std::array<int, 2>* 
     uint32_t mh = static_cast<uint32_t>(model_shape[1]);
     inputs[0] = create_tensor(mw, mh, SSNE_Y_8, SSNE_BUF_AI);
     memset(&outputs[0], 0, sizeof(ssne_tensor_t));
-
-    printf("[EMOTIONCLASSIFIER] Initialized: crop=%dx%d → model=%dx%d\n",
+    printf("[EMOTIONCLASSIFIER] Initialized: crop=%dx%d -> model=%dx%d\n",
         img_shape[0], img_shape[1], model_shape[0], model_shape[1]);
 }
 
@@ -88,8 +91,9 @@ void EMOTIONCLASSIFIER::Release() {
 
     release_tensor(inputs[0]);
 
-    if (get_data(outputs[0]) != nullptr)
-        release_tensor(outputs[0]);
+    // NOTE: outputs[0] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
+    // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
+    outputs[0].data = nullptr;
 
     ReleaseAIPreprocessPipe(pipe_offline);
     printf("[EMOTIONCLASSIFIER] Resources released.\n");

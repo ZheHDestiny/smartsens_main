@@ -28,10 +28,7 @@ void print_menu() {
     std::cout << "  5. 光流避障 (Optical Flow Debug - FAST + LK)\n";
     std::cout << "  6. 表情识别 (Facial Expressions - CNN分类)\n";
     std::cout << "  7. 手势识别 (Gesture Detection - CNN分类 + CLAHE)\n";
-    std::cout << "  --------------------------------------------------  \n";
-    std::cout << "  温馨提示：偶尔遇到串口没有输出或者可视化没输出属于正常现象，\n";
-    std::cout << "  请耐心等待或者按 q or Q退出，不要按Ctrl+C强行打断程序！\n";
-    std::cout << "  0. 退出系统程序\n";
+    std::cout << "  0. 退出(quit)\n";
     std::cout << "======================================================\n";
     std::cout << "请输入功能编号 (0-7) 并按回车: ";
 }
@@ -39,12 +36,23 @@ void print_menu() {
 int main(int argc, char** argv) {
     int choice = -1;
     
+    setup_signal_handlers();
+    
     std::cout << "\033[2J\033[1;1H";
     
     std::array<int, 2> img_shape = {720, 1280};
     VISUALIZER menu_visualizer;
 
     while (true) {
+        if (g_signal_received.load()) {
+            menu_visualizer.Clear();
+            menu_visualizer.Release();
+            std::cout << "\n>> 收到中断信号，安全退出系统...\n";
+            return 0;
+        }
+        
+        clear_stdin_residual();
+        
         menu_visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
         
         menu_visualizer.DrawBitmap("background.ssbmp", "shared_colorLUT.sscl", 0, 0, 2);
@@ -64,6 +72,11 @@ int main(int argc, char** argv) {
 
         menu_visualizer.Clear();
         menu_visualizer.Release();
+
+        if (g_signal_received.load()) {
+            std::cout << "\n>> 收到中断信号，安全退出系统...\n";
+            return 0;
+        }
 
         switch (choice) {
             case 1:

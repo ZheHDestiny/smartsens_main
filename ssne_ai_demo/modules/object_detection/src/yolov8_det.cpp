@@ -34,6 +34,7 @@ void YOLOV8_OBJECT::Initialize(const std::string& model_path, std::array<int, 2>
     model_id = ssne_loadmodel(const_cast<char*>(model_path.c_str()), SSNE_STATIC_ALLOC);
     SetNormalize(pipe_offline, model_id);
     inputs[0] = create_tensor(det_shape[0], det_shape[1], SSNE_Y_8, SSNE_BUF_AI);
+    memset(outputs, 0, sizeof(outputs));
 }
 
 void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_head,
@@ -59,12 +60,6 @@ void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_he
                 }
             }
             if (best_score < conf_threshold) continue;
-            if (!printed_first_pixel) {
-                printf(">>> HIT TARGET! x=%d, y=%d, best_class=%d, Logits=%f, Sigmoid_Score=%f\n", 
-                       x, y, best_class, cls_head[spatial_idx * kNumClasses + best_class], best_score);
-                printed_first_pixel = true;
-            }
-
             std::array<float, 4> dist = {};
             for (int side = 0; side < 4; ++side) {
                 float max_logit = -1e9f;
@@ -146,8 +141,6 @@ void YOLOV8_OBJECT::Postprocess(std::vector<std::array<float, 4>>* boxes,
     }
 }
 
-static ssne_tensor_t g_last_img;
-static ssne_tensor_t g_last_pipe_input;
 static ssne_tensor_t g_letterbox_tensor;
 static bool g_lb_init = false;
 
@@ -179,37 +172,28 @@ void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, f
     int ret = RunAiPreprocessPipe(pipe_offline, g_letterbox_tensor, inputs[0]);
 
     if (ret != 0) {
-        printf("[ERROR] Hardware Preprocess Failed!\n");
+        result->Clear();
         return;
     }
     ret = ssne_inference(model_id, 1, inputs);
     if (ret) {
-        fprintf(stderr, "Inference failed with error code %d\n", ret);  
+        result->Clear();
         return;
     }
-    ssne_getoutput(model_id, 6, outputs);
+    int getout_ret = ssne_getoutput(model_id, 6, outputs);
+    if (getout_ret != 0) {
+        fprintf(stderr, "[ERROR] ssne_getoutput failed! ret=%d\n", getout_ret);
+        result->Clear();
+        return;
+    }
 
-    /*static bool printed_debug_info = false;
-    if (!printed_debug_info) {
-        printf("========== DEBUG TENSOR INFO ==========\n");
-        for (int i = 0; i < 6; i++) {
-            int w = get_width(outputs[i]);
-            int h = get_height(outputs[i]);
-            size_t mem_size = get_mem_size(outputs[i]);
-            int c = mem_size / (w * h * 4); 
-            printf("DEBUG - outputs[%d]: W=%d, H=%d, C=%d, MemSize=%zu\n", i, w, h, c, mem_size);
+    for (int i = 0; i < 6; i++) {
+        if (get_data(outputs[i]) == nullptr) {
+            fprintf(stderr, "[ERROR] ssne_getoutput returned null data for output %d\n", i);
+            result->Clear();
+            return;
         }
-        for (int i = 0; i < 4; i++) {
-            float* data = (float*)get_data(outputs[i]);
-            printf("DEBUG - outputs[%d] first 10 values: ", i);
-            for (int k = 0; k < 10; k++) {
-                printf("%f ", data[k]);
-            }
-            printf("\n");
-        }
-        printf("=======================================\n");
-        printed_debug_info = true;
-    }*/
+    }
 
     std::vector<std::array<float, 4>> boxes;
     std::vector<float> scores;
@@ -233,6 +217,14 @@ void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, f
 
 void YOLOV8_OBJECT::Release() {
     release_tensor(inputs[0]);
-    for(int i=0; i<6; i++) release_tensor(outputs[i]);
+    if (g_lb_init) {
+        release_tensor(g_letterbox_tensor);
+        g_lb_init = false;
+    }
+    // NOTE: outputs[i] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
+    // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
+    for(int i=0; i<6; i++) {
+        outputs[i].data = nullptr;
+    }
     ReleaseAIPreprocessPipe(pipe_offline);
 }

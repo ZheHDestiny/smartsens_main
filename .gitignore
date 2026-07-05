@@ -1,1 +1,4 @@
 *.m1model
+.vscode/
+*.svg
+追焦功能.md

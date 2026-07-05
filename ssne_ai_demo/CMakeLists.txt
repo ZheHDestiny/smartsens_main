@@ -40,6 +40,8 @@ file(GLOB BUSINESS_SRC
     "${CMAKE_SOURCE_DIR}/modules/facial_expressions/src/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/gesture_detection/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/gesture_detection/src/*.cpp"
+    "${CMAKE_SOURCE_DIR}/modules/focus_tracking/*.cpp"
+    "${CMAKE_SOURCE_DIR}/modules/focus_tracking/src/*.cpp"
 )
 
 # ==========================================

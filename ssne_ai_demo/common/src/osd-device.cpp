@@ -20,7 +20,11 @@ namespace osd{
 
 OsdDevice::OsdDevice()
     : m_height(0), m_width(0) {
-    memset(m_layer_dma, 0, sizeof(m_layer_dma));
+    for (int i = 0; i < OSD_LAYER_SIZE; ++i) {
+        m_layer_dma[i] = fdevice::DMA_BUFFER_ATTR_S();
+    }
+    m_qrangle_out = fdevice::VERTEXS_S();
+    m_qrangle_in = fdevice::VERTEXS_S();
 }
 
 OsdDevice::~OsdDevice() {
@@ -229,6 +233,7 @@ void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int l
 }
 
 void OsdDevice::DrawTexture(const char* bitmap_path, const char* lut_path, int layer_id, int pos_x, int pos_y, fdevice::ALPHATYPE alpha) {
+    (void)lut_path;
     if (!m_osd_enabled) return;
     if (layer_id < 0 || layer_id >= OSD_LAYER_SIZE || !m_layer_created[layer_id]) {
         std::cerr << "[OsdDevice] ERROR: Layer " << layer_id << " not created, skipping DrawTexture." << std::endl;

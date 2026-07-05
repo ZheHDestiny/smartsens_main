@@ -23,6 +23,7 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
                                 uint16_t out_w, uint16_t out_h) {
     SigintBlocker sig_blocker;
     img_shape = *in_img_shape;
+    is_opened = false;
     format_online = SSNE_Y_8; 
     OnlineSetCrop(kPipeline0, crop_x1, crop_x2, crop_y1, crop_y2);
     OnlineSetOutputImage(kPipeline0, format_online, out_w, out_h);
@@ -31,6 +32,7 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
         printf("[ERROR] Failed to open online pipeline! ret: %d\n", res0);
         return;
     }
+    is_opened = true;
 }
 
 /**
@@ -38,6 +40,12 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
  * @param img_sensor 输出参数：存储从 pipe0 获取的裁剪图像
  */
 void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
+    if (!is_opened) {
+        if (img_sensor) {
+            img_sensor->data = nullptr;
+        }
+        return;
+    }
     int capture_code = GetImageData(img_sensor, kPipeline0, kSensor0, 0);
     if (capture_code != 0) {
         printf("[IMAGEPROCESSOR] Get Invalid Image from kPipeline0!\n");
@@ -52,5 +60,8 @@ void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
  */
 void IMAGEPROCESSOR::Release() {
     SigintBlocker sig_blocker;
-    CloseOnlinePipeline(kPipeline0);
+    if (is_opened) {
+        CloseOnlinePipeline(kPipeline0);
+        is_opened = false;
+    }
 }

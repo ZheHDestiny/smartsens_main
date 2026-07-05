@@ -112,7 +112,7 @@ private:
     fdevice::DMA_BUFFER_ATTR_S m_layer_dma[OSD_LAYER_SIZE];
     bool m_layer_created[OSD_LAYER_SIZE] = {false};
     bool m_osd_enabled = false;
-    fdevice::VERTEXS_S m_qrangle_out={0}, m_qrangle_in={0};
+    fdevice::VERTEXS_S m_qrangle_out, m_qrangle_in;
 };
 
 } // namespace osd

@@ -27,6 +27,8 @@ static inline float clampf(float v, float lo, float hi) {
 }
 
 static int flow_magnitude_color(float dx, float dy) {
+    (void)dx;
+    (void)dy;
     return 1; 
 }
 
@@ -151,14 +153,30 @@ void VISUALIZER::Draw(const std::vector<std::array<float, 4>>& boxes,
         float x1 = boxes[i][0];
         float y1 = boxes[i][1];
         float x2 = boxes[i][2];
-        float conf_width = (x2 - x1) * scores[i]; 
+        float y2 = boxes[i][3];
+        float score = clampf(scores[i], 0.0f, 1.0f);
+        float conf_width = (x2 - x1) * score;
+        const float conf_gap = 8.0f;
+        const float conf_h = 8.0f;
+        float conf_y2 = y1 - conf_gap;
+        float conf_y1 = conf_y2 - conf_h;
+        if (conf_y1 < 0.0f) {
+            conf_y1 = y2 + conf_gap;
+            conf_y2 = conf_y1 + conf_h;
+            if (conf_y2 > static_cast<float>(m_height - 1)) {
+                conf_y2 = y2 - conf_gap;
+                conf_y1 = conf_y2 - conf_h;
+            }
+        }
+        conf_y1 = clampf(conf_y1, 0.0f, static_cast<float>(m_height - 1));
+        conf_y2 = clampf(conf_y2, 0.0f, static_cast<float>(m_height - 1));
 
-        q_conf.box = {x1, y1 - 6.0f, x1 + conf_width, y1};
+        q_conf.box = {x1, conf_y1, x1 + conf_width, conf_y2};
         q_conf.border = 0; 
         q_conf.layer_id = DETECTION_LAYER_ID;
         q_conf.type = fdevice::TYPE_SOLID; 
-        q_conf.alpha = fdevice::TYPE_ALPHA75;
-        q_conf.color = color_idx; 
+        q_conf.alpha = fdevice::TYPE_ALPHA100;
+        q_conf.color = (color_idx == 1) ? 6 : 1; 
 
         quad_rangles.push_back(q_conf);
     }
@@ -173,6 +191,7 @@ void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
                            const std::vector<int>& directions,
                            int crop_offset_y,
                            int crop_height) {
+    (void)scores;
     if (!enabled_) return;
     if (crop_height > 0) {
         DrawMask(crop_offset_y, crop_height);
@@ -278,6 +297,7 @@ void VISUALIZER::DrawMask(int crop_offset_y, int crop_height) {
 }
 
 void VISUALIZER::DrawAll(const std::vector<FeaturePoint>& features, const ObstacleInfo& obstacle_info, int crop_offset_y, uint32_t frame_count) {
+    (void)features;
     if (!enabled_) return;
     DrawMask(crop_offset_y, 540); 
     DrawObstacleRegions(obstacle_info, crop_offset_y, frame_count);
@@ -644,6 +664,7 @@ void VISUALIZER::DrawSimple(const EmotionResult& result, const std::array<float,
 }
 
 int VISUALIZER::HandGestureColor(HandGestureClass g) {
+    (void)g;
     return C_GESTURE1; 
 }
 

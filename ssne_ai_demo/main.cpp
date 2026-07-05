@@ -16,6 +16,7 @@ extern int run_rps_detection();
 extern int run_optical_flow_debug();
 extern int run_facial_expressions();
 extern int run_gesture_detection();
+extern int run_focus_tracking();
 
 void print_menu() {
     std::cout << "\n======================================================\n";
@@ -28,12 +29,16 @@ void print_menu() {
     std::cout << "  5. 光流避障 (Optical Flow Debug - FAST + LK)\n";
     std::cout << "  6. 表情识别 (Facial Expressions - CNN分类)\n";
     std::cout << "  7. 手势识别 (Gesture Detection - CNN分类 + CLAHE)\n";
+    std::cout << "  8. 追焦功能 (Focus Tracking - 单目目标追踪聚焦)\n";
     std::cout << "  0. 退出(quit)\n";
     std::cout << "======================================================\n";
-    std::cout << "请输入功能编号 (0-7) 并按回车: ";
+    std::cout << "请输入功能编号 (0-8) 并按回车: ";
 }
 
 int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
     int choice = -1;
     
     setup_signal_handlers();
@@ -113,6 +118,11 @@ int main(int argc, char** argv) {
                 std::cout << "\n>> 正在启动 [手势识别] 模块...\n";
                 run_gesture_detection();
                 std::cout << "\n>> [手势识别] 模块已安全退出，返回主菜单。\n";
+                break;
+            case 8:
+                std::cout << "\n>> 进入 [追焦功能] 子菜单...\n";
+                run_focus_tracking();
+                std::cout << "\n>> 已离开 [追焦功能]，返回主菜单。\n";
                 break;
             case 0:
                 std::cout << "\n>> 正在退出系统... 再见！\n";

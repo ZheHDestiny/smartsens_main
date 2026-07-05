@@ -29,10 +29,12 @@ public:
                     
     void GetImage(ssne_tensor_t* img_sensor);
     void Release();
+    bool IsOpened() const { return is_opened; }
     
     std::array<int, 2> img_shape;
 private:
     uint8_t format_online;
+    bool is_opened = false;
 };
 struct ObjectDetectionResult {
     std::vector<std::array<float, 4>> boxes;
@@ -245,6 +247,95 @@ private:
     int width_, height_;
     float ComputeTTC(float x, float y, float dx, float dy);
     float ComputeDivergence(const std::vector<FeaturePoint>& features);
+};
+
+enum class FocusTrackingMode : int {
+    NO_NPU_TRACKER = 0,
+    NPU_MOBILENET = 1
+};
+
+struct FocusTrackingConfig {
+    int width;
+    int height;
+    int target_w;
+    int target_h;
+    int search_radius;
+    int search_step;
+    int sample_step;
+    int lost_frame_limit;
+    int npu_interval_frames;
+    float template_lr;
+    float response_threshold;
+    float motion_alpha;
+    FocusTrackingMode mode;
+    std::string npu_model_path;
+
+    FocusTrackingConfig();
+};
+
+struct FocusTargetState {
+    bool locked;
+    int x;
+    int y;
+    int w;
+    int h;
+    float cx;
+    float cy;
+    float vx;
+    float vy;
+    float confidence;
+    float focus_score;
+    int age;
+    int lost_frames;
+
+    FocusTargetState();
+    void Clear();
+};
+
+class FocusTracker {
+public:
+    FocusTracker();
+
+    void Initialize(const FocusTrackingConfig& config);
+    void Reset();
+    bool SetTarget(const uint8_t* frame, const FocusTargetState& target);
+    bool Update(const uint8_t* frame, FocusTargetState* state);
+    bool HasTarget() const;
+
+private:
+    FocusTrackingConfig cfg_;
+    FocusTargetState state_;
+    std::vector<uint8_t> templ_;
+    bool initialized_;
+
+    bool SelectTarget(const uint8_t* frame);
+    void ExtractTemplate(const uint8_t* frame, int x, int y);
+    void UpdateTemplate(const uint8_t* frame, int x, int y);
+    float MatchTemplateSad(const uint8_t* frame, int x, int y) const;
+    float TextureScore(const uint8_t* frame, int x, int y, int w, int h) const;
+    float FocusScore(const uint8_t* frame, int x, int y, int w, int h) const;
+    void ClampRoi(int* x, int* y) const;
+};
+
+class MobileNetFocusSelector {
+public:
+    MobileNetFocusSelector();
+
+    void Initialize(const std::string& model_path,
+                    std::array<int, 2>* in_img_shape,
+                    std::array<int, 2>* in_model_shape);
+    bool Predict(ssne_tensor_t* img_in, FocusTargetState* target);
+    void Release();
+    bool IsReady() const;
+
+private:
+    uint16_t model_id = 0;
+    ssne_tensor_t inputs[1];
+    ssne_tensor_t outputs[2];
+    AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
+    std::array<int, 2> img_shape;
+    std::array<int, 2> model_shape;
+    bool ready_;
 };
 
 

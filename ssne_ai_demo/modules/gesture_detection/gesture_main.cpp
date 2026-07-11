@@ -1,6 +1,6 @@
 /*
  * @Filename: gesture_main.cpp
- * @Description: 手势识别演示主程序
+ * @Description: 手势识别演示主程序 (带背景减除)
  */
 
 #include <fstream>
@@ -9,6 +9,7 @@
 #include <thread>
 #include <mutex>
 #include <unistd.h>
+#include <chrono>
 
 #include "common.hpp"
 #include "utils.hpp"
@@ -18,6 +19,19 @@ using namespace std;
 static bool g_exit_flag = false;
 static bool g_clahe_enabled = false;
 static std::mutex g_mtx;
+
+// ========== 背景减除辅助函数（原地修改） ==========
+static void subtract_background(const uint8_t* curr, const uint8_t* bg,
+    uint8_t* dst, int pixel_count, int threshold = 30) {
+    for (int i = 0; i < pixel_count; ++i) {
+        int diff = abs((int)curr[i] - (int)bg[i]);
+        if (diff < threshold) {
+            dst[i] = 0;
+        } else {
+            dst[i] = (uint8_t)diff;
+        }
+    }
+}
 
 static void keyboard_listener() {
     std::string input;
@@ -92,57 +106,91 @@ int run_gesture_detection() {
 
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
+
+    // 背景减除相关变量
+    const int crop_pixels = crop_shape[0] * crop_shape[1];
+    uint8_t* background = new uint8_t[crop_pixels];
+    bool bg_captured = false;
+
     std::thread listener_thread(keyboard_listener);
-    HandGestureClass last_reported_gesture =
-        HandGestureClass::NUM_CLASSES;
+    HandGestureClass last_reported_gesture = HandGestureClass::NUM_CLASSES;
     bool last_reported_clahe = false;
     auto last_result_report = std::chrono::steady_clock::now()
                             - std::chrono::seconds(1);
 
+    // ========== 捕获背景帧 ==========
+    {
+        std::cout << "请将手移出画面，3秒后自动捕获背景..." << std::endl;
+        for (int i = 3; i > 0 && !check_exit_flag() && !g_signal_received.load(); --i) {
+            sleep(1);
+        }
+
+        if (check_exit_flag() || g_signal_received.load()) {
+            std::cout << "捕获背景前收到退出信号，跳过捕获。" << std::endl;
+            goto cleanup;
+        }
+
+        processor.GetImage(&img_sensor);
+        // 使用 get_data() 获取 CPU 可访问的映射地址
+        void* img_data = get_data(img_sensor);
+        if (img_data != nullptr) {
+            memcpy(background, img_data, crop_pixels);
+            bg_captured = true;
+            std::cout << "背景已捕获。" << std::endl;
+        } else {
+            std::cerr << "背景捕获失败！将使用原始图像识别。" << std::endl;
+            bg_captured = false;
+        }
+    }
+
     {
         SigintBlocker blocker;
         while (!check_exit_flag()) {
-        if (g_signal_received.load()) break;
+            if (g_signal_received.load()) break;
 
-        processor.GetImage(&img_sensor);
-        if (img_sensor.data == nullptr) {
-            usleep(10000);
-            continue;
-        }
+            processor.GetImage(&img_sensor);
+            // 使用 get_data() 获取 CPU 可访问的映射地址
+            void* img_data = get_data(img_sensor);
+            if (img_data == nullptr) {
+                usleep(10000);
+                continue;
+            }
 
-        bool use_clahe = check_clahe_flag();
-        classifier.Predict(&img_sensor, &gesture_result, use_clahe);
-        visualizer.Draw(gesture_result, hand_roi);
+            // 使用 get_data() 返回的指针进行原地背景减除
+            if (bg_captured) {
+                uint8_t* curr = static_cast<uint8_t*>(img_data);
+                subtract_background(curr, background, curr, crop_pixels, 30);
+            }
 
-        const auto report_now = std::chrono::steady_clock::now();
-        const bool result_changed =
-            gesture_result.gesture != last_reported_gesture ||
-            use_clahe != last_reported_clahe;
-        const bool report_due =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                report_now - last_result_report).count() >= 1000;
-        if (result_changed || report_due) {
-            const char* gesture_name = HAND_GESTURE_NAMES[static_cast<int>(gesture_result.gesture)];
-            printf("[GESTURE_RESULT] Final: %-2s (CLAHE:%s, conf=%.2f)\n",
-                   gesture_name,
-                   use_clahe ? "ON " : "OFF",
-                   gesture_result.confidence);
-            last_reported_gesture = gesture_result.gesture;
-            last_reported_clahe = use_clahe;
-            last_result_report = report_now;
-        }
-        if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
-            printf("[GESTURE_DEBUG] probs=[%.2f %.2f %.2f %.2f %.2f %.2f]\n",
-                   gesture_result.all_probs[0], gesture_result.all_probs[1],
-                   gesture_result.all_probs[2], gesture_result.all_probs[3],
-                   gesture_result.all_probs[4], gesture_result.all_probs[5]);
+            bool use_clahe = check_clahe_flag();
+            classifier.Predict(&img_sensor, &gesture_result, use_clahe);
+            visualizer.Draw(gesture_result, hand_roi);
+
+            const auto report_now = std::chrono::steady_clock::now();
+            const bool result_changed =
+                gesture_result.gesture != last_reported_gesture ||
+                use_clahe != last_reported_clahe;
+            const bool report_due =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    report_now - last_result_report).count() >= 1000;
+            if (result_changed || report_due) {
+                const char* gesture_name = HAND_GESTURE_NAMES[static_cast<int>(gesture_result.gesture)];
+                printf("[GESTURE_RESULT] Final: %-2s (CLAHE:%s, conf=%.2f)\n",
+                       gesture_name,
+                       use_clahe ? "ON " : "OFF",
+                       gesture_result.confidence);
+                last_reported_gesture = gesture_result.gesture;
+                last_reported_clahe = use_clahe;
+                last_result_report = report_now;
+            }
         }
     }
 
-    }
-
+cleanup:
     if (listener_thread.joinable())
         listener_thread.join();
+
+    delete[] background;
 
     classifier.Release();
     processor.Release();

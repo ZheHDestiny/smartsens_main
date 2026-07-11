@@ -121,6 +121,8 @@ int run_speed_detection() {
     std::thread listener_thread(keyboard_listener);
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
+    auto last_result_report = std::chrono::steady_clock::now()
+                            - std::chrono::seconds(1);
 
     std::map<int, TrackedVehicle> trackers;
     int next_tracker_id = 0;
@@ -257,7 +259,11 @@ int run_speed_detection() {
             directions_draw.push_back(trackers[best_tracker_id].direction);
         }
 
-        if (det_result.boxes.size() > 0) {
+        const auto report_now = std::chrono::steady_clock::now();
+        const bool report_result =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                report_now - last_result_report).count() >= 1000;
+        if (!boxes_draw.empty() && report_result) {
             std::string frame_log = "";
             char string_buf[256];
             snprintf(string_buf, sizeof(string_buf), "[SPEED_LOG] DETS: ");
@@ -269,6 +275,7 @@ int run_speed_detection() {
                 frame_log += string_buf;
             }
             printf("%s\n", frame_log.c_str());
+            last_result_report = report_now;
         }
 
         visualizer.DrawSpeed(boxes_draw, scores_draw, ids_draw, speeds_draw, directions_draw,560,720);

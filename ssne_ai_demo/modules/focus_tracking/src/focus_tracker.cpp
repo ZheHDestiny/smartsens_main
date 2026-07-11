@@ -22,6 +22,9 @@ FocusTrackingConfig::FocusTrackingConfig()
       template_lr(0.08f),
       response_threshold(0.58f),
       motion_alpha(0.35f),
+      position_smooth_alpha(0.65f),
+      template_update_threshold(0.68f),
+      min_focus_score_for_update(3.0f),
       mode(FocusTrackingMode::NO_NPU_TRACKER),
       npu_model_path("./app_assets/models/focus_mobilenet.m1model") {}
 
@@ -53,6 +56,9 @@ void FocusTracker::Initialize(const FocusTrackingConfig& config) {
     cfg_.target_h = std::max(16, std::min(cfg_.target_h, cfg_.height));
     cfg_.search_step = std::max(1, cfg_.search_step);
     cfg_.sample_step = std::max(1, cfg_.sample_step);
+    cfg_.position_smooth_alpha = std::max(0.0f, std::min(1.0f, cfg_.position_smooth_alpha));
+    cfg_.template_update_threshold = std::max(0.0f, std::min(1.0f, cfg_.template_update_threshold));
+    cfg_.min_focus_score_for_update = std::max(0.0f, cfg_.min_focus_score_for_update);
     templ_.assign((size_t)cfg_.target_w * (size_t)cfg_.target_h, 0);
     state_.Clear();
     initialized_ = true;
@@ -130,19 +136,31 @@ bool FocusTracker::Update(const uint8_t* frame, FocusTargetState* out_state) {
         } else {
             float old_cx = state_.cx;
             float old_cy = state_.cy;
-            state_.x = best_x;
-            state_.y = best_y;
+            if (state_.age > 1) {
+                float keep = 1.0f - cfg_.position_smooth_alpha;
+                state_.x = (int)std::round(keep * (float)state_.x +
+                                           cfg_.position_smooth_alpha * (float)best_x);
+                state_.y = (int)std::round(keep * (float)state_.y +
+                                           cfg_.position_smooth_alpha * (float)best_y);
+                ClampRoi(&state_.x, &state_.y);
+            } else {
+                state_.x = best_x;
+                state_.y = best_y;
+            }
             state_.w = cfg_.target_w;
             state_.h = cfg_.target_h;
-            state_.cx = (float)best_x + 0.5f * (float)cfg_.target_w;
-            state_.cy = (float)best_y + 0.5f * (float)cfg_.target_h;
+            state_.cx = (float)state_.x + 0.5f * (float)cfg_.target_w;
+            state_.cy = (float)state_.y + 0.5f * (float)cfg_.target_h;
             state_.vx = cfg_.motion_alpha * (state_.cx - old_cx) + (1.0f - cfg_.motion_alpha) * state_.vx;
             state_.vy = cfg_.motion_alpha * (state_.cy - old_cy) + (1.0f - cfg_.motion_alpha) * state_.vy;
             state_.confidence = best_score;
             state_.focus_score = FocusScore(frame, state_.x, state_.y, state_.w, state_.h);
             state_.age++;
             state_.lost_frames = 0;
-            UpdateTemplate(frame, state_.x, state_.y);
+            if (best_score >= cfg_.template_update_threshold &&
+                state_.focus_score >= cfg_.min_focus_score_for_update) {
+                UpdateTemplate(frame, state_.x, state_.y);
+            }
         }
     }
 
@@ -292,14 +310,18 @@ void MobileNetFocusSelector::Initialize(const std::string& model_path,
 
     if (model_path.empty() || model_shape[0] <= 0 || model_shape[1] <= 0) {
         ready_ = false;
-        printf("[FOCUS_NPU] MobileNet selector reserved, invalid model path or shape.\n");
+        if (RuntimeLogEnabled()) {
+            printf("[FOCUS_NPU] MobileNet selector reserved, invalid model path or shape.\n");
+        }
         return;
     }
 
     model_id = ssne_loadmodel(const_cast<char*>(model_path.c_str()), SSNE_STATIC_ALLOC);
     if (model_id == 0) {
         ready_ = false;
-        printf("[FOCUS_NPU] MobileNet model load failed: %s\n", model_path.c_str());
+        if (RuntimeLogEnabled()) {
+            printf("[FOCUS_NPU] MobileNet model load failed: %s\n", model_path.c_str());
+        }
         return;
     }
 
@@ -307,7 +329,9 @@ void MobileNetFocusSelector::Initialize(const std::string& model_path,
     inputs[0] = create_tensor(model_shape[0], model_shape[1], SSNE_Y_8, SSNE_BUF_AI);
     std::memset(outputs, 0, sizeof(outputs));
     ready_ = true;
-    printf("[FOCUS_NPU] MobileNet focus selector loaded, id=%d\n", model_id);
+    if (RuntimeLogEnabled()) {
+        printf("[FOCUS_NPU] MobileNet focus selector loaded, id=%d\n", model_id);
+    }
 }
 
 bool MobileNetFocusSelector::Predict(ssne_tensor_t* img_in, FocusTargetState* target) {
@@ -315,10 +339,20 @@ bool MobileNetFocusSelector::Predict(ssne_tensor_t* img_in, FocusTargetState* ta
     if (!ready_ || img_in == nullptr || target == nullptr) return false;
 
     int ret = RunAiPreprocessPipe(pipe_offline, *img_in, inputs[0]);
-    if (ret != 0) return false;
+    if (ret != 0) {
+        if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+            printf("[FOCUS_NPU] preprocess failed ret=%d\n", ret);
+        }
+        return false;
+    }
 
     ret = ssne_inference(model_id, 1, inputs);
-    if (ret != 0) return false;
+    if (ret != 0) {
+        if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+            printf("[FOCUS_NPU] inference failed ret=%d\n", ret);
+        }
+        return false;
+    }
 
     /*
      * Reserved output contract for the planned MobileNet focus model:

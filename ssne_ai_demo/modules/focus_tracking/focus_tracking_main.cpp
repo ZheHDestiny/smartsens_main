@@ -3,6 +3,7 @@
  * @Description: Monocular focus tracking demo for grayscale SmartSens camera.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -237,6 +238,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     tracker_config.search_radius = 30;
     tracker_config.search_step = 3;
     tracker_config.sample_step = 4;
+    tracker_config.position_smooth_alpha = 0.65f;
+    tracker_config.template_update_threshold = 0.68f;
+    tracker_config.min_focus_score_for_update = 3.0f;
     tracker_config.mode = selected_mode;
     tracker_config.npu_model_path = "./app_assets/models/focus_mobilenet.m1model";
     tracker_config.npu_interval_frames = 15;
@@ -249,7 +253,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     array<int, 2> capture_shape = {capture_w, capture_h};
     if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
         npu_selector.Initialize(tracker_config.npu_model_path, &capture_shape, &npu_model_shape);
-        if (!npu_selector.IsReady()) {
+        if (!npu_selector.IsReady() && RuntimeLogEnabled()) {
             fprintf(stderr,
                     "[WARN] MobileNet NPU 模式已选择，但模型/接口尚不可用；"
                     "当前帧会继续由传统追踪器兜底。\n");
@@ -279,6 +283,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     uint32_t frame_count = 0;
     uint32_t locked_count = 0;
     uint32_t last_log_frame = 0;
+    uint32_t last_recover_successes = 0;
+    uint32_t npu_failure_streak = 0;
+    bool npu_disabled = false;
     bool last_osd_locked = false;
     auto start_time = chrono::steady_clock::now();
     chrono::steady_clock::time_point frame_times[10];
@@ -293,16 +300,32 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             }
 
             image_processor.GetImage(&curr_frame);
-            if (curr_frame.data == nullptr) {
-                usleep(5000);
-                continue;
+            ImagePipelineHealthSnapshot health = image_processor.GetHealthSnapshot();
+            if (health.recover_successes != last_recover_successes) {
+                last_recover_successes = health.recover_successes;
+                tracker.Reset();
+                target.Clear();
+                if (osd_present && last_osd_locked) {
+                    vector<array<float, 4>> empty_boxes;
+                    vector<float> empty_scores;
+                    vector<int> empty_ids;
+                    visualizer.Draw(empty_boxes, empty_scores, empty_ids);
+                    last_osd_locked = false;
+                }
+                if (RuntimeLogEnabled()) {
+                    printf("[追焦] camera pipeline 已恢复，清空旧目标并重新选择。\n");
+                }
             }
 
-            uint8_t* capture_ptr = (uint8_t*)get_data(curr_frame);
+            uint8_t* capture_ptr = nullptr;
+            if (curr_frame.data != nullptr) {
+                capture_ptr = (uint8_t*)get_data(curr_frame);
+            }
             if (capture_ptr == nullptr) {
                 usleep(5000);
                 continue;
             }
+
             resize_gray_nearest(capture_ptr, capture_w, capture_h, proc_frame.data(), proc_w, proc_h);
             uint8_t* frame_ptr = proc_frame.data();
 
@@ -316,6 +339,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             frame_count++;
 
             if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET &&
+                !npu_disabled &&
                 npu_selector.IsReady() &&
                 (frame_count == 1 || frame_count % tracker_config.npu_interval_frames == 0 ||
                 !tracker.HasTarget())) {
@@ -324,6 +348,16 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                     FocusTargetState proc_target =
                         scale_target_to_proc(npu_target, capture_w, capture_h, proc_w, proc_h);
                     tracker.SetTarget(frame_ptr, proc_target);
+                    npu_failure_streak = 0;
+                } else {
+                    npu_failure_streak++;
+                    if (npu_failure_streak >= 3) {
+                        npu_disabled = true;
+                        if (RuntimeLogEnabled()) {
+                            printf("[FOCUS_NPU] 连续失败 %u 次，当前会话禁用 NPU 选目标，改用传统追踪兜底。\n",
+                                   npu_failure_streak);
+                        }
+                    }
                 }
             }
 
@@ -382,6 +416,14 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     printf("  • 总帧数: %u\n", frame_count);
     printf("  • 平均帧率: %4.1f FPS\n", avg_fps);
     printf("  • 锁定帧占比: %.1f%%\n", frame_count > 0 ? 100.0f * locked_count / frame_count : 0.0f);
+    ImagePipelineHealthSnapshot final_health = image_processor.GetHealthSnapshot();
+    printf("  • 健康状态: %s\n", IMAGEPROCESSOR::HealthStateName(final_health.state));
+    printf("  • 无效帧: total=%u max_streak=%u recover=%u/%u fail=%u\n",
+           final_health.invalid_frame_total,
+           final_health.max_invalid_frame_streak,
+           final_health.recover_successes,
+           final_health.recover_attempts,
+           final_health.recover_failures);
 
     tracker.Reset();
     npu_selector.Release();

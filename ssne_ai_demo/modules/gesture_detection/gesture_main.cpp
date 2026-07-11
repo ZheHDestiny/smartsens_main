@@ -93,6 +93,11 @@ int run_gesture_detection() {
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
     std::thread listener_thread(keyboard_listener);
+    HandGestureClass last_reported_gesture =
+        HandGestureClass::NUM_CLASSES;
+    bool last_reported_clahe = false;
+    auto last_result_report = std::chrono::steady_clock::now()
+                            - std::chrono::seconds(1);
 
     {
         SigintBlocker blocker;
@@ -109,17 +114,29 @@ int run_gesture_detection() {
         classifier.Predict(&img_sensor, &gesture_result, use_clahe);
         visualizer.Draw(gesture_result, hand_roi);
 
-        const char* gesture_name = HAND_GESTURE_NAMES[static_cast<int>(gesture_result.gesture)];
-        printf("[GESTURE] Final: %-2s (CLAHE:%s, conf=%.2f) | Raw: [0]:%.2f [1]:%.2f [2]:%.2f [3]:%.2f [4]:%.2f [5]:%.2f\n",
-               gesture_name,
-               use_clahe ? "ON " : "OFF",
-               gesture_result.confidence,
-               gesture_result.all_probs[0],
-               gesture_result.all_probs[1],
-               gesture_result.all_probs[2],
-               gesture_result.all_probs[3],
-               gesture_result.all_probs[4],
-               gesture_result.all_probs[5]);
+        const auto report_now = std::chrono::steady_clock::now();
+        const bool result_changed =
+            gesture_result.gesture != last_reported_gesture ||
+            use_clahe != last_reported_clahe;
+        const bool report_due =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                report_now - last_result_report).count() >= 1000;
+        if (result_changed || report_due) {
+            const char* gesture_name = HAND_GESTURE_NAMES[static_cast<int>(gesture_result.gesture)];
+            printf("[GESTURE_RESULT] Final: %-2s (CLAHE:%s, conf=%.2f)\n",
+                   gesture_name,
+                   use_clahe ? "ON " : "OFF",
+                   gesture_result.confidence);
+            last_reported_gesture = gesture_result.gesture;
+            last_reported_clahe = use_clahe;
+            last_result_report = report_now;
+        }
+        if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+            printf("[GESTURE_DEBUG] probs=[%.2f %.2f %.2f %.2f %.2f %.2f]\n",
+                   gesture_result.all_probs[0], gesture_result.all_probs[1],
+                   gesture_result.all_probs[2], gesture_result.all_probs[3],
+                   gesture_result.all_probs[4], gesture_result.all_probs[5]);
+        }
     }
 
     }

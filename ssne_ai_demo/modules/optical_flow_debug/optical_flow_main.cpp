@@ -154,8 +154,6 @@ int run_optical_flow_debug() {
 
     vector<FeaturePoint> features;
     ObstacleInfo obstacle_info;
-    memset(&obstacle_info, 0, sizeof(obstacle_info));
-    obstacle_info.priority = 4;  
 
     ssne_tensor_t curr_frame;
     memset(&curr_frame, 0, sizeof(ssne_tensor_t));
@@ -172,11 +170,6 @@ int run_optical_flow_debug() {
     int last_danger_region = -1;
     uint32_t last_log_frame = 0;
     
-    int last_osd_priority = -1;
-    int last_osd_region = -1;
-    float last_osd_danger[3] = {-1.0f, -1.0f, -1.0f};
-    bool is_osd_safe_cleared = false;
-
     auto program_start_time = std::chrono::steady_clock::now();
     std::chrono::duration<float> total_paused_time(0); 
     std::chrono::steady_clock::time_point frame_times[10];

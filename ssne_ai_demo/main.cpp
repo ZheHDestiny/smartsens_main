@@ -35,6 +35,50 @@ void print_menu() {
     std::cout << "请输入功能编号 (0-8) 并按回车: ";
 }
 
+const char* runtime_log_mode_name(RuntimeLogMode mode) {
+    switch (mode) {
+        case RuntimeLogMode::SILENT:
+            return "静默模式";
+        case RuntimeLogMode::SUMMARY:
+            return "摘要模式";
+        case RuntimeLogMode::VERIFY:
+            return "验证模式";
+        default:
+            return "未知模式";
+    }
+}
+
+RuntimeLogMode choose_runtime_log_mode() {
+    while (!g_signal_received.load()) {
+        int choice = -1;
+        std::cout << "\n======================================================\n";
+        std::cout << "              运行日志模式 / Log Mode                \n";
+        std::cout << "======================================================\n";
+        std::cout << "  说明：业务识别结果始终输出；以下选项只控制额外诊断日志\n";
+        std::cout << "  0. 静默模式：仅输出业务结果，最低串口开销\n";
+        std::cout << "  1. 摘要模式：业务结果 + 每秒公共管线健康摘要\n";
+        std::cout << "  2. 验证模式：业务结果 + FPS/P95/图像质量/调试统计\n";
+        std::cout << "======================================================\n";
+        std::cout << "请选择日志模式 (0-2) 并按回车: ";
+        std::cin >> choice;
+
+        if (std::cin.fail()) {
+            std::cin.clear();
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            std::cout << "\n[错误] 输入无效，请输入数字编号！\n";
+            continue;
+        }
+
+        if (choice == 0) return RuntimeLogMode::SILENT;
+        if (choice == 1) return RuntimeLogMode::SUMMARY;
+        if (choice == 2) return RuntimeLogMode::VERIFY;
+
+        std::cout << "\n[提示] 无效的日志模式选项 (" << choice << ")，请重新选择。\n";
+    }
+
+    return RuntimeLogMode::SUMMARY;
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -81,6 +125,12 @@ int main(int argc, char** argv) {
         if (g_signal_received.load()) {
             std::cout << "\n>> 收到中断信号，安全退出系统...\n";
             return 0;
+        }
+
+        if (choice >= 1 && choice <= 8) {
+            RuntimeLogMode log_mode = choose_runtime_log_mode();
+            SetRuntimeLogMode(log_mode);
+            std::cout << "\n>> 当前日志模式: " << runtime_log_mode_name(log_mode) << "\n";
         }
 
         switch (choice) {

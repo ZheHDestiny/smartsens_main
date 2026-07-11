@@ -94,7 +94,9 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
     case GameState::IDLE: {
         int non_idle_streak = temporal_buffer.ConsecutiveNonIdle(WIND_UP_FRAMES);
         if (non_idle_streak >= WIND_UP_FRAMES) {
-            printf("[RPS] Wind-up detected! Switching to WIND_UP.\n");
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                printf("[RPS] Wind-up detected! Switching to WIND_UP.\n");
+            }
             game_state        = GameState::WIND_UP;
             state_frame_count = 0;
         }
@@ -114,8 +116,10 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
             voted_conf = current_confidence;
         }
         locked_prediction = voted;
-        printf("[RPS] WIND_UP -> PREDICTED: human=%s (conf=%.2f)\n",
-               GESTURE_NAMES[static_cast<int>(voted)], voted_conf);
+        if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+            printf("[RPS] WIND_UP -> PREDICTED: human=%s (conf=%.2f)\n",
+                   GESTURE_NAMES[static_cast<int>(voted)], voted_conf);
+        }
         game_state        = GameState::PREDICTED;
         state_frame_count = 0;
 
@@ -135,7 +139,9 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
         result->is_locked     = true;
 
         if (state_frame_count >= DISPLAY_HOLD_FRAMES) {
-            printf("[RPS] PREDICTED -> DISPLAY\n");
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                printf("[RPS] PREDICTED -> DISPLAY\n");
+            }
             game_state        = GameState::DISPLAY;
             state_frame_count = 0;
         }
@@ -151,7 +157,9 @@ void RPSCLASSIFIER::UpdateStateMachine(GestureClass current_gesture,
 
         int idle_streak = temporal_buffer.ConsecutiveIdle(IDLE_RESET_FRAMES);
         if (idle_streak >= IDLE_RESET_FRAMES) {
-            printf("[RPS] DISPLAY -> IDLE (player reset hand)\n");
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                printf("[RPS] DISPLAY -> IDLE (player reset hand)\n");
+            }
             game_state        = GameState::IDLE;
             state_frame_count = 0;
             locked_prediction = GestureClass::IDLE;

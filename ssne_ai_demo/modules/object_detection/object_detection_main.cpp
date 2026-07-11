@@ -85,7 +85,6 @@ int run_object_detection() {
 
     array<int, 2> img_shape = {img_width, img_height};
     array<int, 2> crop_shape = {720, 540};
-    const int crop_offset_y = 370;
 
     IMAGEPROCESSOR processor;
     processor.Initialize(&img_shape, 0, 720, 0, 1280, 720, 1280);
@@ -100,6 +99,8 @@ int run_object_detection() {
     std::thread listener_thread(keyboard_listener);
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
+    auto last_result_report = std::chrono::steady_clock::now()
+                            - std::chrono::seconds(1);
 
     {
         SigintBlocker blocker;
@@ -121,6 +122,10 @@ int run_object_detection() {
         }
 
         detector.Predict(&img_sensor, &det_result, 0.40f);
+        const auto report_now = std::chrono::steady_clock::now();
+        const bool report_result =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                report_now - last_result_report).count() >= 1000;
 
         if (det_result.boxes.size() > 0) {
             std::vector<std::array<float, 4>> boxes_original_coord;
@@ -152,8 +157,11 @@ int run_object_detection() {
 
                 int id = det_result.class_ids[i];
                 std::string name = class_names.count(id) ? class_names[id] : "Unknown";
-                std::cout << "[DET] Class: " << name << " Score: " << det_result.scores[i] << std::endl;
+                if (report_result) {
+                    std::cout << "[DET] Class: " << name << " Score: " << det_result.scores[i] << std::endl;
+                }
             }
+            if (report_result) last_result_report = report_now;
             visualizer.Draw(boxes_original_coord, display_scores, display_class_ids);
         } else {
             std::vector<std::array<float, 4>> empty_boxes;

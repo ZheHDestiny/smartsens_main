@@ -11,6 +11,7 @@
 #include "log.hpp"
 
 std::atomic<bool> g_signal_received{false};
+std::atomic<int> g_runtime_log_mode{static_cast<int>(RuntimeLogMode::SUMMARY)};
 
 using namespace fdevice;
 using OsdQR = sst::device::osd::OsdQuadRangle;

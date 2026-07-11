@@ -53,7 +53,8 @@ int run_facial_expressions() {
     int img_width = 720;
     int img_height = 1280;
 
-    array<int, 2> model_shape = { 224, 224 };
+    // 编译器支持3×112×112；摄像头仍是Y8，预处理复制到RGB三通道。
+    array<int, 2> model_shape = { 112, 112 };
     string path_model = "./app_assets/models/emotion_4class.m1model";
     array<int, 2> crop_shape = { 640, 640 };
     const std::array<float, 4> face_roi = { 40.f, 320.f, 680.f, 960.f };
@@ -82,6 +83,9 @@ int run_facial_expressions() {
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
     std::thread listener_thread(keyboard_listener);
+    EmotionClass last_reported_emotion = EmotionClass::NUM_CLASSES;
+    auto last_result_report = std::chrono::steady_clock::now()
+                            - std::chrono::seconds(1);
 
     {
         SigintBlocker blocker;
@@ -98,8 +102,20 @@ int run_facial_expressions() {
         classifier.Predict(&img_sensor, &emotion_result);
         visualizer.DrawSimple(emotion_result, face_roi);
 
-        const char* emotion_name = EMOTION_NAMES[static_cast<int>(emotion_result.emotion)];
-        printf("[EMOTION] %-10s (conf=%.2f)\n", emotion_name, emotion_result.confidence);
+        const auto report_now = std::chrono::steady_clock::now();
+        const bool result_changed =
+            emotion_result.emotion != last_reported_emotion;
+        const bool report_due =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                report_now - last_result_report).count() >= 1000;
+        if (result_changed || report_due) {
+            const char* emotion_name =
+                EMOTION_NAMES[static_cast<int>(emotion_result.emotion)];
+            printf("[EMOTION_RESULT] %-10s confidence=%.3f\n",
+                   emotion_name, emotion_result.confidence);
+            last_reported_emotion = emotion_result.emotion;
+            last_result_report = report_now;
+        }
     }
 
     }

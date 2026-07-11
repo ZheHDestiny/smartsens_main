@@ -82,6 +82,7 @@ int run_rps_detection() {
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
     std::thread listener_thread(keyboard_listener);
+    bool result_was_locked = false;
 
     {
         SigintBlocker blocker;
@@ -98,7 +99,7 @@ int run_rps_detection() {
         classifier.Predict(&img_sensor, rps_result);
         visualizer.Draw(*rps_result, hand_roi);
 
-        if (rps_result->is_locked) {
+        if (rps_result->is_locked && !result_was_locked) {
             const char* human_name = GESTURE_NAMES[static_cast<int>(rps_result->human_gesture)];
             const char* ai_name   = GESTURE_NAMES[static_cast<int>(rps_result->ai_counter)];
             printf("[GAME] Human: %-8s  ->  AI plays: %-8s  (conf=%.2f, state=%d)\n",
@@ -106,6 +107,7 @@ int run_rps_detection() {
                    rps_result->confidence,
                    static_cast<int>(rps_result->game_state));
         }
+        result_was_locked = rps_result->is_locked;
     }
 
     }

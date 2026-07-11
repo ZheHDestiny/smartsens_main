@@ -87,6 +87,8 @@ int run_face_detection() {
     memset(&img_sensor, 0, sizeof(img_sensor));
 
     std::thread listener_thread(keyboard_listener);
+    auto last_result_report = std::chrono::steady_clock::now()
+                            - std::chrono::seconds(1);
 
     {
         SigintBlocker blocker;
@@ -101,6 +103,10 @@ int run_face_detection() {
         }
 
         detector.Predict(&img_sensor, det_result, 0.4f);
+        const auto report_now = std::chrono::steady_clock::now();
+        const bool report_result =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                report_now - last_result_report).count() >= 1000;
 
         if (det_result->boxes.size() > 0) {
             std::vector<std::array<float, 4>> boxes_original_coord;
@@ -121,9 +127,12 @@ int run_face_detection() {
                     continue;
                 }
                 boxes_original_coord.push_back({x1_orig, y1_orig, x2_orig, y2_orig});
-                printf("[FACE DETECTED] id=%zu, coords:(%.1f, %.1f) to (%.1f, %.1f), score: %.2f\n",
-                       i, x1_orig, y1_orig, x2_orig, y2_orig, det_result->scores[i]);
+                if (report_result) {
+                    printf("[FACE DETECTED] id=%zu, coords:(%.1f, %.1f) to (%.1f, %.1f), score: %.2f\n",
+                           i, x1_orig, y1_orig, x2_orig, y2_orig, det_result->scores[i]);
+                }
             }
+            if (report_result) last_result_report = report_now;
             visualizer.Draw(boxes_original_coord);
         }
         else {

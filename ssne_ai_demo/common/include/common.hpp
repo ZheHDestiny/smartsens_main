@@ -18,7 +18,67 @@
 #include <iostream>
 #include <limits>
 #include <termios.h>
+#include <chrono>
 #include "smartsoc/ssne_api.h"
+
+enum class ImagePipelineHealthState {
+    OK = 0,
+    DEGRADED,
+    RECOVERING,
+    FAILED
+};
+
+enum class ImageQualityState {
+    UNKNOWN = 0,
+    NORMAL,
+    TOO_DARK,
+    TOO_BRIGHT,
+    LOW_TEXTURE
+};
+
+enum class RuntimeLogMode : int {
+    SILENT = 0,
+    SUMMARY = 1,
+    VERIFY = 2
+};
+
+struct ImagePipelineHealthSnapshot {
+    ImagePipelineHealthState state;
+    ImageQualityState quality_state;
+    uint32_t valid_frames;
+    uint32_t invalid_frame_streak;
+    uint32_t invalid_frame_total;
+    uint32_t max_invalid_frame_streak;
+    uint32_t recover_attempts;
+    uint32_t recover_successes;
+    uint32_t recover_failures;
+    uint32_t consecutive_recover_failures;
+    uint32_t poor_quality_streak;
+    float mean_luma;
+    float dark_ratio;
+    float bright_ratio;
+    float texture_score;
+    float avg_fps;
+    float p95_frame_ms;
+};
+
+extern std::atomic<int> g_runtime_log_mode;
+
+inline RuntimeLogMode GetRuntimeLogMode() {
+    return static_cast<RuntimeLogMode>(g_runtime_log_mode.load());
+}
+
+inline void SetRuntimeLogMode(RuntimeLogMode mode) {
+    g_runtime_log_mode.store(static_cast<int>(mode));
+}
+
+inline bool RuntimeLogAtLeast(RuntimeLogMode mode) {
+    return g_runtime_log_mode.load() >= static_cast<int>(mode);
+}
+
+inline bool RuntimeLogEnabled() {
+    return RuntimeLogAtLeast(RuntimeLogMode::SUMMARY);
+}
 
 class IMAGEPROCESSOR {
 public:
@@ -30,11 +90,80 @@ public:
     void GetImage(ssne_tensor_t* img_sensor);
     void Release();
     bool IsOpened() const { return is_opened; }
+    void ConfigureRecovery(uint32_t warn_frames,
+                           uint32_t recover_frames,
+                           uint32_t max_recover_failures,
+                           int backoff_base_ms,
+                           int backoff_max_ms);
+    void ConfigureQualityCheck(uint32_t sample_interval,
+                               uint32_t warn_samples,
+                               float dark_mean_threshold,
+                               float bright_mean_threshold,
+                               float low_texture_threshold);
+    ImagePipelineHealthSnapshot GetHealthSnapshot() const;
+    static const char* HealthStateName(ImagePipelineHealthState state);
+    static const char* QualityStateName(ImageQualityState state);
     
     std::array<int, 2> img_shape;
 private:
     uint8_t format_online;
     bool is_opened = false;
+    bool config_valid = false;
+    uint16_t crop_x1_ = 0;
+    uint16_t crop_x2_ = 0;
+    uint16_t crop_y1_ = 0;
+    uint16_t crop_y2_ = 0;
+    uint16_t out_w_ = 0;
+    uint16_t out_h_ = 0;
+
+    ImagePipelineHealthState health_state = ImagePipelineHealthState::OK;
+    ImageQualityState quality_state = ImageQualityState::UNKNOWN;
+    uint32_t valid_frames = 0;
+    uint32_t invalid_frame_streak = 0;
+    uint32_t invalid_frame_total = 0;
+    uint32_t max_invalid_frame_streak = 0;
+    uint32_t recover_attempts = 0;
+    uint32_t recover_successes = 0;
+    uint32_t recover_failures = 0;
+    uint32_t consecutive_recover_failures = 0;
+    uint32_t poor_quality_streak = 0;
+    uint32_t last_invalid_warn_streak = 0;
+    uint32_t invalid_log_count = 0;
+    uint32_t quality_sample_interval = 5;
+    uint32_t quality_warn_samples = 6;
+    uint32_t warn_frames = 15;
+    uint32_t recover_frames = 30;
+    uint32_t max_recover_failures = 5;
+    float mean_luma = 0.0f;
+    float dark_ratio = 0.0f;
+    float bright_ratio = 0.0f;
+    float texture_score = 0.0f;
+    float avg_fps = 0.0f;
+    float p95_frame_ms = 0.0f;
+    float dark_mean_threshold = 28.0f;
+    float bright_mean_threshold = 235.0f;
+    float low_texture_threshold = 2.0f;
+    float frame_period_ms[120] = {0.0f};
+    uint32_t frame_period_index = 0;
+    uint32_t frame_period_count = 0;
+    bool has_last_valid_frame_time = false;
+    int backoff_base_ms = 300;
+    int backoff_max_ms = 3000;
+    std::chrono::steady_clock::time_point last_recover_attempt =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    std::chrono::steady_clock::time_point last_valid_frame_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_summary_time =
+        std::chrono::steady_clock::now();
+
+    bool OpenConfiguredPipeline();
+    bool RecoverPipeline();
+    void SetHealthState(ImagePipelineHealthState next, const char* reason);
+    void SetQualityState(ImageQualityState next, const char* reason);
+    void ResetHealth();
+    void AnalyzeFrameQuality(const ssne_tensor_t* img_sensor);
+    void RecordFrameTiming();
+    void MaybePrintRuntimeSummary();
 };
 struct ObjectDetectionResult {
     std::vector<std::array<float, 4>> boxes;
@@ -267,6 +396,9 @@ struct FocusTrackingConfig {
     float template_lr;
     float response_threshold;
     float motion_alpha;
+    float position_smooth_alpha;
+    float template_update_threshold;
+    float min_focus_score_for_update;
     FocusTrackingMode mode;
     std::string npu_model_path;
 
@@ -491,29 +623,36 @@ struct EmotionResult {
 };
 
 struct EmotionTemporalBuffer {
-    static const int CAPACITY = 5;
-    EmotionClass emotions[CAPACITY];
-    float confidences[CAPACITY];
-    int head; int count;
-    EmotionTemporalBuffer() : head(0), count(0) {
-        for (int i = 0; i < CAPACITY; i++) { emotions[i] = EmotionClass::NEUTRAL; confidences[i] = 0.f; }
+    static constexpr float EMA_TAU_MS = 400.0f;
+    float ema_probs[4];
+    uint64_t last_timestamp_ms;
+    int valid_count;
+
+    EmotionTemporalBuffer() { Reset(); }
+
+    void Reset() {
+        for (int i = 0; i < 4; i++) ema_probs[i] = 0.0f;
+        last_timestamp_ms = 0;
+        valid_count = 0;
     }
-    void Push(EmotionClass emotion, float confidence) {
-        emotions[head] = emotion; confidences[head] = confidence;
-        head = (head + 1) % CAPACITY;
-        if (count < CAPACITY) count++;
-    }
-    EmotionClass GetWeightedVote(float* out_confidence) const {
-        float class_score[4] = { 0.f };
-        int look = count;
-        for (int i = 0; i < look; i++) {
-            int idx = ((head - 1 - i) + CAPACITY) % CAPACITY;
-            class_score[static_cast<int>(emotions[idx])] += 1.f * confidences[idx];
+
+    void Push(const float probs[4], uint64_t timestamp_ms) {
+        if (valid_count == 0) {
+            for (int i = 0; i < 4; i++) ema_probs[i] = probs[i];
+        } else {
+            uint64_t dt_ms = timestamp_ms > last_timestamp_ms
+                           ? timestamp_ms - last_timestamp_ms : 0;
+            float alpha = 1.0f - expf(-static_cast<float>(dt_ms) / EMA_TAU_MS);
+            for (int i = 0; i < 4; i++) {
+                ema_probs[i] = alpha * probs[i] + (1.0f - alpha) * ema_probs[i];
+            }
         }
-        int best = 0;
-        for (int c = 1; c < 4; c++) { if (class_score[c] > class_score[best]) best = c; }
-        if (out_confidence) *out_confidence = (look > 0) ? (class_score[best] / look) : 0.f;
-        return static_cast<EmotionClass>(best);
+        last_timestamp_ms = timestamp_ms;
+        valid_count++;
+    }
+
+    const float* GetProbs() const {
+        return ema_probs;
     }
 };
 
@@ -521,16 +660,63 @@ class EMOTIONCLASSIFIER {
 public:
     void Initialize(std::string& model_path, std::array<int, 2>* in_img_shape, std::array<int, 2>* in_model_shape);
     void Predict(ssne_tensor_t* img_in, EmotionResult* result);
-    void RunSingleFrameInference(ssne_tensor_t* img, float out_probs[4]);
+    bool RunSingleFrameInference(ssne_tensor_t* img, float out_probs[4]);
     void Release();
     std::array<int, 2> img_shape; std::array<int, 2> model_shape;
 private:
+    static const int WARMUP_VALID_FRAMES = 3;
+    static const int SWITCH_CONFIRM_FRAMES = 3;
+    static constexpr float CONF_ON = 0.55f;
+    static constexpr float MARGIN_ON = 0.12f;
+    static constexpr float SWITCH_MARGIN = 0.08f;
+    static const uint64_t MIN_HOLD_MS = 400;
+    static const uint64_t UNCERTAIN_TIMEOUT_MS = 1000;
+
     uint16_t model_id = 0;
     ssne_tensor_t inputs[1]; ssne_tensor_t outputs[1];
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
     uint8_t* prev_frame_buf = nullptr; uint8_t* diff_buf = nullptr;
     bool has_prev_frame = false; int frame_pixels = 0;
+    bool model_ready = false;
+    bool preprocess_contract_logged = false;
+    const char* last_inference_failure_reason = "not_started";
+    float last_logits[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     EmotionTemporalBuffer temporal_buffer;
+
+    EmotionClass stable_emotion = EmotionClass::NEUTRAL;
+    float stable_confidence = 0.0f;
+    EmotionClass candidate_emotion = EmotionClass::NEUTRAL;
+    int candidate_count = 0;
+    uint64_t candidate_since_ms = 0;
+    uint64_t last_switch_ms = 0;
+    uint64_t last_valid_ms = 0;
+
+    float motion_mean = 0.0f;
+    float motion_m2 = 0.0f;
+    uint32_t motion_samples = 0;
+    uint64_t last_debug_ms = 0;
+    uint64_t stats_start_ms = 0;
+    uint32_t total_frames = 0;
+    uint32_t accepted_frames = 0;
+    uint32_t inference_failures = 0;
+    uint32_t quality_rejections = 0;
+    uint32_t dark_rejections = 0;
+    uint32_t bright_rejections = 0;
+    uint32_t contrast_rejections = 0;
+    uint32_t motion_rejections = 0;
+    uint32_t uncertain_frames = 0;
+    uint32_t class_switches = 0;
+    float switch_delay_sum_ms = 0.0f;
+
+    bool ImageQualityAccepted(const ssne_tensor_t* img, float* brightness,
+                              float* contrast, float* motion_score,
+                              const char** reject_reason);
+    void KeepLastStableResult(EmotionResult* result) const;
+    void ResetTemporalState(uint64_t now_ms);
+    void MaybePrintDebug(uint64_t now_ms, const ssne_tensor_t* camera_img,
+                         const float raw_probs[4],
+                         float brightness, float contrast, float motion_score,
+                         bool accepted, const char* reason);
 };
 
 enum class HandGestureClass : int {

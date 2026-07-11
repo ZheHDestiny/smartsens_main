@@ -13,15 +13,15 @@
 
 static void ApplyClippedHistogramEqualization(uint8_t* img, int width, int height) {
     int total_pixels = width * height;
-    int hist[256] = {0};
+    int hist[256] = { 0 };
 
     for (int i = 0; i < total_pixels; i++) {
         hist[img[i]]++;
     }
 
-    int clip_limit = std::max(1, total_pixels / 256 * 3); 
+    int clip_limit = std::max(1, total_pixels / 256 * 3);
     int excess = 0;
-    
+
     for (int i = 0; i < 256; i++) {
         if (hist[i] > clip_limit) {
             excess += (hist[i] - clip_limit);
@@ -36,7 +36,7 @@ static void ApplyClippedHistogramEqualization(uint8_t* img, int width, int heigh
         if (i < upper) hist[i]++;
     }
 
-    int lut[256] = {0};
+    int lut[256] = { 0 };
     int sum = 0;
     for (int i = 0; i < 256; i++) {
         sum += hist[i];
@@ -48,8 +48,12 @@ static void ApplyClippedHistogramEqualization(uint8_t* img, int width, int heigh
     }
 }
 
-
 void HANDGESTURECLASSIFIER::RunSingleFrameInference(ssne_tensor_t* img, float out_probs[6], bool use_clahe) {
+    if (model_id < 0) {
+        for (int i = 0; i < 6; i++) out_probs[i] = 1.0f / 6.0f;
+        return;
+    }
+
     uint8_t* curr = static_cast<uint8_t*>(get_data(*img));
 
     if (use_clahe) {
@@ -58,6 +62,7 @@ void HANDGESTURECLASSIFIER::RunSingleFrameInference(ssne_tensor_t* img, float ou
 
     int ret = RunAiPreprocessPipe(pipe_offline, *img, inputs[0]);
     if (ret != 0) {
+        fprintf(stderr, "[ERROR] GESTURE RunAiPreprocessPipe failed! ret=%d\n", ret);
         for (int i = 0; i < 6; i++) out_probs[i] = 1.0f / 6.0f;
         return;
     }
@@ -97,18 +102,27 @@ void HANDGESTURECLASSIFIER::Initialize(std::string& model_path, std::array<int, 
 
     char* model_path_cstr = const_cast<char*>(model_path.c_str());
     model_id = ssne_loadmodel(model_path_cstr, SSNE_STATIC_ALLOC);
+    if (model_id < 0) {
+        fprintf(stderr, "[HANDGESTURECLASSIFIER] ERROR: Failed to load model from %s, error code %d\n", model_path_cstr, model_id);
+        model_id = -1;
+        return;
+    }
     printf("[HANDGESTURECLASSIFIER] Model loaded, id=%d\n", model_id);
 
     uint32_t mw = static_cast<uint32_t>(model_shape[0]);
     uint32_t mh = static_cast<uint32_t>(model_shape[1]);
     inputs[0] = create_tensor(mw, mh, SSNE_Y_8, SSNE_BUF_AI);
     memset(&outputs[0], 0, sizeof(ssne_tensor_t));
+
+    // pipe_offline 已在 common.hpp 中通过 GetAIPreprocessPipe() 默认初始化，
+    // 此处无需手动创建，参考 scrfd_gray.cpp / rps_classifier.cpp 风格
+
     printf("[HANDGESTURECLASSIFIER] Initialized: crop=%dx%d -> model=%dx%d\n",
         img_shape[0], img_shape[1], model_shape[0], model_shape[1]);
 }
 
 void HANDGESTURECLASSIFIER::Predict(ssne_tensor_t* img_in, HandGestureResult* result, bool use_clahe) {
-    float probs[6] = { 0.f };
+    float probs[6] = {0.f};
     RunSingleFrameInference(img_in, probs, use_clahe);
 
     for (int i = 0; i < 6; i++) {
@@ -128,11 +142,7 @@ void HANDGESTURECLASSIFIER::Predict(ssne_tensor_t* img_in, HandGestureResult* re
 
 void HANDGESTURECLASSIFIER::Release() {
     release_tensor(inputs[0]);
-
-    // NOTE: outputs[0] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
-    // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
     outputs[0].data = nullptr;
-
     ReleaseAIPreprocessPipe(pipe_offline);
     printf("[HANDGESTURECLASSIFIER] Resources released.\n");
 }

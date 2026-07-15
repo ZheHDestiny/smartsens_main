@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -25,6 +26,8 @@ using namespace std;
 static bool g_focus_exit = false;
 static bool g_focus_pause = false;
 static bool g_focus_reset = false;
+static bool g_focus_enroll = false;
+static bool g_focus_clear_id = false;
 static std::mutex g_focus_mtx;
 
 static const char* focus_mode_name(FocusTrackingMode mode) {
@@ -32,7 +35,7 @@ static const char* focus_mode_name(FocusTrackingMode mode) {
         case FocusTrackingMode::NO_NPU_TRACKER:
             return "传统视觉追焦";
         case FocusTrackingMode::NPU_MOBILENET:
-            return "MobileNet NPU追焦";
+            return "EyeDet-S + FaceID-S 智能追焦";
         default:
             return "未知追焦模式";
     }
@@ -43,7 +46,7 @@ static void print_focus_mode_menu() {
     cout << "          追焦功能子菜单 / Focus Tracking            \n";
     cout << "======================================================\n";
     cout << "  1. 传统视觉追焦 (No NPU - 高帧率模板追踪)\n";
-    cout << "  2. MobileNet NPU追焦 (模型选目标 + 传统追踪接管)\n";
+    cout << "  2. EyeDet-S + FaceID-S 智能追焦 (双眼检测 + 临时ID)\n";
     cout << "  0. 返回主菜单\n";
     cout << "======================================================\n";
     cout << "请输入追焦子功能编号 (0-2) 并按回车: ";
@@ -104,6 +107,8 @@ static void focus_keyboard_listener() {
     printf("[追焦键盘] ┌─────────────────────────────────┐\n");
     printf("[追焦键盘] │ P/p: 暂停/继续                  │\n");
     printf("[追焦键盘] │ R/r: 重置锁定目标                │\n");
+    printf("[追焦键盘] │ E/e: 录入当前目标为 id_tmp       │\n");
+    printf("[追焦键盘] │ C/c: 清除临时身份                 │\n");
     printf("[追焦键盘] │ Q/q: 退出当前子功能并返回子菜单  │\n");
     printf("[追焦键盘] └─────────────────────────────────┘\n\n");
 
@@ -125,6 +130,12 @@ static void focus_keyboard_listener() {
                 g_focus_pause = false;
                 g_focus_reset = true;
             }
+            if (input == "e" || input == "E") {
+                g_focus_enroll = true;
+            }
+            if (input == "c" || input == "C") {
+                g_focus_clear_id = true;
+            }
         }
     }
 }
@@ -144,6 +155,20 @@ static bool focus_take_reset_request() {
     bool reset = g_focus_reset;
     g_focus_reset = false;
     return reset;
+}
+
+static bool focus_take_enroll_request() {
+    lock_guard<mutex> lock(g_focus_mtx);
+    bool request = g_focus_enroll;
+    g_focus_enroll = false;
+    return request;
+}
+
+static bool focus_take_clear_id_request() {
+    lock_guard<mutex> lock(g_focus_mtx);
+    bool request = g_focus_clear_id;
+    g_focus_clear_id = false;
+    return request;
 }
 
 static void resize_gray_nearest(const uint8_t* src,
@@ -185,6 +210,8 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
         g_focus_exit = false;
         g_focus_pause = false;
         g_focus_reset = false;
+        g_focus_enroll = false;
+        g_focus_clear_id = false;
     }
 
     clear_stdin_residual();
@@ -242,21 +269,31 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     tracker_config.template_update_threshold = 0.68f;
     tracker_config.min_focus_score_for_update = 3.0f;
     tracker_config.mode = selected_mode;
-    tracker_config.npu_model_path = "./app_assets/models/focus_mobilenet.m1model";
-    tracker_config.npu_interval_frames = 15;
+    tracker_config.npu_model_path = "./app_assets/models/eyedet_s.m1model";
+    tracker_config.npu_interval_frames = 1;
 
     FocusTracker tracker;
     tracker.Initialize(tracker_config);
 
-    MobileNetFocusSelector npu_selector;
-    array<int, 2> npu_model_shape = {160, 160};
-    array<int, 2> capture_shape = {capture_w, capture_h};
+    EyeDetFaceIdEngine smart_engine;
     if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
-        npu_selector.Initialize(tracker_config.npu_model_path, &capture_shape, &npu_model_shape);
-        if (!npu_selector.IsReady() && RuntimeLogEnabled()) {
+        if (!ssne_ok || !smart_engine.Initialize(
+                "./app_assets/models/eyedet_s.m1model",
+                "./app_assets/models/faceid_s.m1model",
+                capture_w,
+                capture_h)) {
             fprintf(stderr,
-                    "[WARN] MobileNet NPU 模式已选择，但模型/接口尚不可用；"
-                    "当前帧会继续由传统追踪器兜底。\n");
+                    "[ERROR] EyeDet-S 初始化失败；模式2无法满足模型契约，返回子菜单。\n");
+            smart_engine.Release();
+            image_processor.Release();
+            if (ssne_ok) {
+                SigintBlocker blocker;
+                ssne_release();
+            }
+            return -1;
+        }
+        if (!smart_engine.FaceIdReady()) {
+            fprintf(stderr, "[WARN] FaceID-S 不可用；保留 EyeDet 追焦，临时ID已降级。\n");
         }
     }
 
@@ -271,7 +308,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     printf("[配置] sensor=%dx%d crop=(%d,%d)-(%d,%d) capture=%dx%d proc=%dx%d\n",
            sensor_w, sensor_h, crop_x1, crop_y1, crop_x2, crop_y2, capture_w, capture_h, proc_w, proc_h);
     printf("[模式] %s\n", focus_mode_name(tracker_config.mode));
-    printf("[处理] P/p暂停 | R/r重置 | Q/q返回追焦子菜单\n\n");
+    printf("[处理] P/p暂停 | R/r重置 | E/e录入id_tmp | C/c清ID | Q/q返回\n\n");
 
     thread listener_thread(focus_keyboard_listener);
 
@@ -279,13 +316,17 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     memset(&curr_frame, 0, sizeof(ssne_tensor_t));
     vector<uint8_t> proc_frame((size_t)proc_w * (size_t)proc_h);
     FocusTargetState target;
+    EyeDetResult eye_result;
+    IdentityResult identity_result;
+    uint64_t identity_track_id = 0;
+    auto last_identity_time = chrono::steady_clock::now() - chrono::seconds(10);
+    uint64_t faceid_runs = 0;
+    float faceid_total_ms = 0.0f;
 
     uint32_t frame_count = 0;
     uint32_t locked_count = 0;
     uint32_t last_log_frame = 0;
     uint32_t last_recover_successes = 0;
-    uint32_t npu_failure_streak = 0;
-    bool npu_disabled = false;
     bool last_osd_locked = false;
     auto start_time = chrono::steady_clock::now();
     chrono::steady_clock::time_point frame_times[10];
@@ -305,6 +346,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 last_recover_successes = health.recover_successes;
                 tracker.Reset();
                 target.Clear();
+                smart_engine.ResetSession();
+                identity_result.Clear();
+                identity_track_id = 0;
                 if (osd_present && last_osd_locked) {
                     vector<array<float, 4>> empty_boxes;
                     vector<float> empty_scores;
@@ -332,39 +376,95 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             if (focus_take_reset_request()) {
                 tracker.Reset();
                 target.Clear();
+                smart_engine.ResetSession();
+                identity_result.Clear();
+                identity_track_id = 0;
                 printf("[追焦] 已重置锁定目标，下一帧重新选择。\n");
+            }
+
+            if (focus_take_clear_id_request()) {
+                smart_engine.ClearEnrollment();
+                identity_result.Clear();
+                identity_track_id = 0;
+                printf("[FACEID] 已清除 id_tmp、录入样本和身份显示。\n");
             }
 
             frame_times[frame_count % 10] = chrono::steady_clock::now();
             frame_count++;
 
-            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET &&
-                !npu_disabled &&
-                npu_selector.IsReady() &&
-                (frame_count == 1 || frame_count % tracker_config.npu_interval_frames == 0 ||
-                !tracker.HasTarget())) {
-                FocusTargetState npu_target;
-                if (npu_selector.Predict(&curr_frame, &npu_target)) {
-                    FocusTargetState proc_target =
-                        scale_target_to_proc(npu_target, capture_w, capture_h, proc_w, proc_h);
-                    tracker.SetTarget(frame_ptr, proc_target);
-                    npu_failure_streak = 0;
-                } else {
-                    npu_failure_streak++;
-                    if (npu_failure_streak >= 3) {
-                        npu_disabled = true;
-                        if (RuntimeLogEnabled()) {
-                            printf("[FOCUS_NPU] 连续失败 %u 次，当前会话禁用 NPU 选目标，改用传统追踪兜底。\n",
-                                   npu_failure_streak);
+            bool locked = false;
+            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                const bool det_ok = smart_engine.DetectEyes(&curr_frame, &eye_result);
+                if (det_ok && eye_result.selected_index >= 0) {
+                    EyePair& pair = eye_result.pairs[eye_result.selected_index];
+                    const float eye_distance = pair.EyeDistance();
+                    FocusTargetState detected_target;
+                    detected_target.w = tracker_config.target_w;
+                    detected_target.h = tracker_config.target_h;
+                    detected_target.cx = pair.Cx() * proc_w / capture_w;
+                    detected_target.cy = (pair.Cy() + 0.65f * eye_distance) * proc_h / capture_h;
+                    detected_target.x = static_cast<int>(std::round(
+                        detected_target.cx - 0.5f * tracker_config.target_w));
+                    detected_target.y = static_cast<int>(std::round(
+                        detected_target.cy - 0.5f * tracker_config.target_h));
+                    detected_target.confidence = 0.5f * (pair.left.score + pair.right.score);
+                    tracker.SetTarget(frame_ptr, detected_target);
+
+                    if (identity_track_id != 0 && identity_track_id != pair.track_id) {
+                        identity_result.Clear();
+                        identity_track_id = 0;
+                    }
+                    if (frame_count == 1 || frame_count % 6 == 0 || smart_engine.IsEnrolling()) {
+                        IdentityResult next_identity;
+                        if (smart_engine.Identify(capture_ptr, capture_w, capture_h,
+                                                 pair, &next_identity)) {
+                            identity_result = next_identity;
+                            identity_track_id = pair.track_id;
+                            last_identity_time = chrono::steady_clock::now();
+                            ++faceid_runs;
+                            faceid_total_ms += next_identity.npu_ms;
                         }
                     }
+                } else if (det_ok && eye_result.lost_frames > 15) {
+                    tracker.Reset();
                 }
+                if (focus_take_enroll_request()) {
+                    if (!smart_engine.BeginEnroll()) {
+                        printf("[FACEID] 无稳定双眼目标或 FaceID 不可用，无法开始录入。\n");
+                    } else {
+                        identity_result.Clear();
+                        identity_track_id = smart_engine.SelectedTrackId();
+                    }
+                }
+                const auto identity_age = chrono::duration_cast<chrono::milliseconds>(
+                    chrono::steady_clock::now() - last_identity_time).count();
+                if (identity_age > 800) {
+                    identity_result.Clear();
+                    identity_result.expired = true;
+                }
+                locked = tracker.HasTarget() && tracker.Update(frame_ptr, &target);
+            } else {
+                focus_take_enroll_request();
+                locked = tracker.Update(frame_ptr, &target);
             }
-
-            bool locked = tracker.Update(frame_ptr, &target);
             if (locked) locked_count++;
 
-            if (locked && osd_present) {
+            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET && osd_present &&
+                !eye_result.eyes.empty()) {
+                vector<array<float, 4>> focus_boxes;
+                vector<float> focus_scores;
+                vector<int> focus_class_ids;
+                for (size_t i = 0; i < eye_result.eyes.size(); ++i) {
+                    const EyeBox& eye = eye_result.eyes[i];
+                    focus_boxes.push_back({eye.x1 + crop_x1, eye.y1 + crop_y1,
+                                           eye.x2 + crop_x1, eye.y2 + crop_y1});
+                    focus_scores.push_back(eye.score);
+                    focus_class_ids.push_back(0);
+                }
+                visualizer.Draw(focus_boxes, focus_scores, focus_class_ids);
+                last_osd_locked = true;
+            } else if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER &&
+                       locked && osd_present) {
                 int sx1 = crop_x1 + target.x * (crop_x2 - crop_x1) / proc_w;
                 int sy1 = crop_y1 + target.y * (crop_y2 - crop_y1) / proc_h;
                 int sx2 = crop_x1 + (target.x + target.w) * (crop_x2 - crop_x1) / proc_w;
@@ -397,6 +497,18 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 printf("[追焦] f=%u fps=%4.1f lock=%d conf=%.2f focus=%.1f dx=%.1f dy=%.1f lost=%d\n",
                        frame_count, fps, locked ? 1 : 0, target.confidence,
                        target.focus_score, dx, dy, target.lost_frames);
+                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                    printf("[EYEDET] fps=%4.1f npu_ms=%.2f eyes=%zu pairs=%zu track=%llu lost=%d\n",
+                           fps, eye_result.npu_ms, eye_result.eyes.size(), eye_result.pairs.size(),
+                           static_cast<unsigned long long>(smart_engine.SelectedTrackId()),
+                           eye_result.lost_frames);
+                    printf("[FACEID] runs=%llu avg_ms=%.2f samples=%d sim=%.4f label=%s%s\n",
+                           static_cast<unsigned long long>(faceid_runs),
+                           faceid_runs > 0 ? faceid_total_ms / faceid_runs : 0.0f,
+                           smart_engine.EnrollmentCount(), identity_result.similarity,
+                           identity_result.label.c_str(),
+                           identity_result.expired ? " expired" : "");
+                }
                 last_log_frame = frame_count;
             }
         }
@@ -426,7 +538,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
            final_health.recover_failures);
 
     tracker.Reset();
-    npu_selector.Release();
+    smart_engine.Release();
     visualizer.Release();
     image_processor.Release();
 

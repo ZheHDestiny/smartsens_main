@@ -10,6 +10,7 @@
 #include <array>
 #include <string>
 #include <math.h>
+#include <cmath>
 #include <cstring>
 #include <atomic>
 #include <csignal>
@@ -468,6 +469,162 @@ private:
     std::array<int, 2> img_shape;
     std::array<int, 2> model_shape;
     bool ready_;
+};
+
+struct EyeBox {
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
+    float score = 0.0f;
+
+    float Width() const { return x2 - x1; }
+    float Height() const { return y2 - y1; }
+    float Cx() const { return 0.5f * (x1 + x2); }
+    float Cy() const { return 0.5f * (y1 + y2); }
+};
+
+struct EyePair {
+    EyeBox left;
+    EyeBox right;
+    float score = 0.0f;
+    uint64_t track_id = 0;
+
+    float Cx() const { return 0.5f * (left.Cx() + right.Cx()); }
+    float Cy() const { return 0.5f * (left.Cy() + right.Cy()); }
+    float EyeDistance() const {
+        const float dx = right.Cx() - left.Cx();
+        const float dy = right.Cy() - left.Cy();
+        return std::sqrt(dx * dx + dy * dy);
+    }
+};
+
+struct EyeDetResult {
+    std::vector<EyeBox> eyes;
+    std::vector<EyePair> pairs;
+    int selected_index = -1;
+    int lost_frames = 0;
+    float npu_ms = 0.0f;
+
+    void Clear() {
+        eyes.clear();
+        pairs.clear();
+        selected_index = -1;
+        lost_frames = 0;
+        npu_ms = 0.0f;
+    }
+};
+
+struct IdentityResult {
+    bool valid = false;
+    bool enrolled = false;
+    bool expired = false;
+    float similarity = 0.0f;
+    float npu_ms = 0.0f;
+    int enrolled_count = 0;
+    std::string label = "unknown";
+
+    void Clear() { *this = IdentityResult(); }
+};
+
+class EyeDetFaceIdEngine {
+public:
+    EyeDetFaceIdEngine();
+    ~EyeDetFaceIdEngine();
+
+    bool Initialize(const std::string& eyedet_path,
+                    const std::string& faceid_path,
+                    int capture_w,
+                    int capture_h);
+    bool DetectEyes(ssne_tensor_t* capture_y8, EyeDetResult* out);
+    bool Identify(const uint8_t* capture_y8,
+                  int width,
+                  int height,
+                  const EyePair& pair,
+                  IdentityResult* out);
+
+    bool BeginEnroll();
+    void ClearEnrollment();
+    void ResetSession();
+    void Release();
+
+    bool IsReady() const { return eyedet_ready_; }
+    bool FaceIdReady() const { return faceid_ready_; }
+    bool IsEnrolling() const { return enrolling_; }
+    int EnrollmentCount() const { return static_cast<int>(enroll_samples_.size()); }
+    uint64_t SelectedTrackId() const { return selected_track_id_; }
+
+private:
+    static const int kDetSize = 640;
+    static const int kFaceSize = 112;
+    static const int kEmbeddingSize = 128;
+
+    uint16_t eyedet_model_id_ = 0;
+    uint16_t faceid_model_id_ = 0;
+    AiPreprocessPipe eyedet_pipe_ = nullptr;
+    AiPreprocessPipe faceid_pipe_ = nullptr;
+    ssne_tensor_t det_canvas_;
+    ssne_tensor_t det_input_;
+    ssne_tensor_t det_outputs_[6];
+    ssne_tensor_t face_roi_;
+    ssne_tensor_t face_input_;
+    ssne_tensor_t face_output_[1];
+
+    bool initialized_ = false;
+    bool eyedet_ready_ = false;
+    bool faceid_ready_ = false;
+    bool det_contract_logged_ = false;
+    bool face_contract_logged_ = false;
+    int capture_w_ = 0;
+    int capture_h_ = 0;
+    float letterbox_scale_ = 1.0f;
+    int letterbox_w_ = 0;
+    int letterbox_h_ = 0;
+
+    bool selected_valid_ = false;
+    uint64_t selected_track_id_ = 0;
+    uint64_t next_track_id_ = 1;
+    float selected_cx_ = 0.0f;
+    float selected_cy_ = 0.0f;
+    float selected_eye_distance_ = 0.0f;
+    int selected_lost_frames_ = 0;
+
+    bool enrolling_ = false;
+    uint64_t enroll_track_id_ = 0;
+    std::vector<std::array<float, kEmbeddingSize>> enroll_samples_;
+    std::array<float, kEmbeddingSize> prototype_;
+    bool prototype_valid_ = false;
+
+    uint64_t det_runs_ = 0;
+    uint64_t det_failures_ = 0;
+    uint64_t face_runs_ = 0;
+    uint64_t face_failures_ = 0;
+
+    bool PrepareEyeDetInput(const uint8_t* src);
+    bool ValidateEyeDetOutputs();
+    void DecodeHead(const float* cls,
+                    const float* reg,
+                    int width,
+                    int height,
+                    int stride,
+                    std::vector<EyeBox>* candidates) const;
+    void NmsAndMap(const std::vector<EyeBox>& candidates,
+                   std::vector<EyeBox>* eyes) const;
+    void PairEyes(const std::vector<EyeBox>& eyes, std::vector<EyePair>* pairs) const;
+    void SelectPair(EyeDetResult* result);
+
+    bool BuildFaceRoi(const uint8_t* src,
+                      int width,
+                      int height,
+                      const EyePair& pair);
+    bool ReadEmbedding(std::array<float, kEmbeddingSize>* embedding);
+    void ConsumeEnrollment(const std::array<float, kEmbeddingSize>& embedding);
+
+    static float Sigmoid(float x);
+    static float IoU(const EyeBox& a, const EyeBox& b);
+    static float Cosine(const std::array<float, kEmbeddingSize>& a,
+                        const std::array<float, kEmbeddingSize>& b);
+    static bool Normalize(std::array<float, kEmbeddingSize>* value);
 };
 
 

@@ -44,6 +44,13 @@ file(GLOB BUSINESS_SRC
     "${CMAKE_SOURCE_DIR}/modules/focus_tracking/src/*.cpp"
 )
 
+# Keep the EyeDet/FaceID engine explicit so an existing Buildroot/CMake cache
+# notices the newly added source file; remove the duplicate produced by GLOB.
+list(APPEND BUSINESS_SRC
+    "${CMAKE_SOURCE_DIR}/modules/focus_tracking/src/eyedet_faceid_engine.cpp"
+)
+list(REMOVE_DUPLICATES BUSINESS_SRC)
+
 # ==========================================
 # 生成可执行文件并链接库
 # ==========================================

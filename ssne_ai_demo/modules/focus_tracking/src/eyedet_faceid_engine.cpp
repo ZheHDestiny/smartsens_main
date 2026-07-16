@@ -19,18 +19,24 @@ float ClampFloat(float value, float low, float high) {
     return std::max(low, std::min(value, high));
 }
 
-uint8_t BilinearGray(const uint8_t* src, int width, int height, float x, float y) {
-    x = ClampFloat(x, 0.0f, static_cast<float>(width - 1));
-    y = ClampFloat(y, 0.0f, static_cast<float>(height - 1));
-    const int x0 = static_cast<int>(x);
-    const int y0 = static_cast<int>(y);
-    const int x1 = std::min(x0 + 1, width - 1);
-    const int y1 = std::min(y0 + 1, height - 1);
-    const float fx = x - static_cast<float>(x0);
-    const float fy = y - static_cast<float>(y0);
-    const float top = src[y0 * width + x0] * (1.0f - fx) + src[y0 * width + x1] * fx;
-    const float bottom = src[y1 * width + x0] * (1.0f - fx) + src[y1 * width + x1] * fx;
-    return static_cast<uint8_t>(ClampFloat(top * (1.0f - fy) + bottom * fy + 0.5f, 0.0f, 255.0f));
+void PrintByteDistribution(const char* name, const uint8_t* data, size_t bytes) {
+    if (name == nullptr || data == nullptr || bytes == 0) return;
+    const size_t samples = std::min<size_t>(4096, bytes);
+    const size_t step = std::max<size_t>(1, bytes / samples);
+    uint8_t min_value = 255;
+    uint8_t max_value = 0;
+    uint64_t sum = 0;
+    size_t count = 0;
+    for (size_t offset = 0; offset < bytes; offset += step) {
+        const uint8_t value = data[offset];
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+        sum += value;
+        ++count;
+    }
+    printf("[EYEDET][INPUT] %s bytes=%zu min=%u max=%u mean=%.2f samples=%zu\n",
+           name, bytes, min_value, max_value,
+           count > 0 ? static_cast<float>(sum) / count : 0.0f, count);
 }
 
 }  // namespace
@@ -66,6 +72,37 @@ bool EyeDetFaceIdEngine::Initialize(const std::string& eyedet_path,
                        static_cast<float>(std::max(capture_w_, capture_h_));
     letterbox_w_ = static_cast<int>(std::floor(capture_w_ * letterbox_scale_ + 0.5f));
     letterbox_h_ = static_cast<int>(std::floor(capture_h_ * letterbox_scale_ + 0.5f));
+    resize_x0_.resize(letterbox_w_);
+    resize_x1_.resize(letterbox_w_);
+    resize_wx_.resize(letterbox_w_);
+    resize_y0_.resize(letterbox_h_);
+    resize_y1_.resize(letterbox_h_);
+    resize_wy_.resize(letterbox_h_);
+
+    const float inv_scale_x =
+        static_cast<float>(capture_w_) / static_cast<float>(letterbox_w_);
+    const float inv_scale_y =
+        static_cast<float>(capture_h_) / static_cast<float>(letterbox_h_);
+    for (int x = 0; x < letterbox_w_; ++x) {
+        const float source_x = ClampFloat(
+            (static_cast<float>(x) + 0.5f) * inv_scale_x - 0.5f,
+            0.0f, static_cast<float>(capture_w_ - 1));
+        const int x0 = static_cast<int>(source_x);
+        resize_x0_[x] = x0;
+        resize_x1_[x] = std::min(x0 + 1, capture_w_ - 1);
+        resize_wx_[x] = static_cast<uint16_t>(
+            ClampFloat((source_x - x0) * 256.0f + 0.5f, 0.0f, 256.0f));
+    }
+    for (int y = 0; y < letterbox_h_; ++y) {
+        const float source_y = ClampFloat(
+            (static_cast<float>(y) + 0.5f) * inv_scale_y - 0.5f,
+            0.0f, static_cast<float>(capture_h_ - 1));
+        const int y0 = static_cast<int>(source_y);
+        resize_y0_[y] = y0;
+        resize_y1_[y] = std::min(y0 + 1, capture_h_ - 1);
+        resize_wy_[y] = static_cast<uint16_t>(
+            ClampFloat((source_y - y0) * 256.0f + 0.5f, 0.0f, 256.0f));
+    }
 
     eyedet_pipe_ = GetAIPreprocessPipe();
     if (eyedet_pipe_ == nullptr) {
@@ -81,18 +118,21 @@ bool EyeDetFaceIdEngine::Initialize(const std::string& eyedet_path,
     int det_uint8 = 0;
     const int det_norm_ret = ssne_get_model_normalize_params(
         eyedet_model_id_, det_mean, det_std, &det_uint8);
-    const int det_set_norm_ret = SetNormalize(eyedet_pipe_, eyedet_model_id_);
+    // EyeDet-S is calibrated with direct Y8 values in [0,255].  Match the
+    // verified RGB3 emotion path: retain Y8->RGB replication, but do not let
+    // the SDK fixed-point normalization collapse the input dynamic range.
+    Clear(eyedet_pipe_);
     det_canvas_ = create_tensor(kDetSize, kDetSize, SSNE_Y_8, SSNE_BUF_AI);
     det_input_ = create_tensor(kDetSize, kDetSize, SSNE_RGB, SSNE_BUF_AI);
-    eyedet_ready_ = det_inputs == 1 && det_dtype_ret == 0 && det_set_norm_ret == 0 &&
+    eyedet_ready_ = det_inputs == 1 && det_dtype_ret == 0 &&
                     get_data(det_canvas_) != nullptr && get_data(det_input_) != nullptr &&
                     get_width(det_input_) == kDetSize && get_height(det_input_) == kDetSize &&
                     get_data_format(det_input_) == SSNE_RGB &&
                     get_mem_size(det_input_) >= static_cast<size_t>(3 * kDetSize * kDetSize);
     printf("[EYEDET] model=%s id=%u inputs=%d dtype=%d dtype_ret=%d "
-           "norm_ret=%d set_norm_ret=%d mean=%d,%d,%d std=%d,%d,%d uint8=%d ready=%d\n",
+           "norm_ret=%d pipe=clear(no_normalize) mean=%d,%d,%d std=%d,%d,%d uint8=%d ready=%d\n",
            eyedet_path.c_str(), eyedet_model_id_, det_inputs, det_dtype, det_dtype_ret,
-           det_norm_ret, det_set_norm_ret, det_mean[0], det_mean[1], det_mean[2],
+           det_norm_ret, det_mean[0], det_mean[1], det_mean[2],
            det_std[0], det_std[1], det_std[2], det_uint8, eyedet_ready_ ? 1 : 0);
     printf("[INPUT][EYEDET] %ux%u dtype=%u format=%u bytes=%zu letterbox=%dx%d scale=%.6f\n",
            get_width(det_input_), get_height(det_input_), get_data_type(det_input_),
@@ -114,19 +154,20 @@ bool EyeDetFaceIdEngine::Initialize(const std::string& eyedet_path,
         int face_uint8 = 0;
         const int face_norm_ret = ssne_get_model_normalize_params(
             faceid_model_id_, face_mean, face_std, &face_uint8);
-        const int face_set_norm_ret = SetNormalize(faceid_pipe_, faceid_model_id_);
+        // FaceID-S uses the same direct Y8->RGB3 pixel-value contract.
+        Clear(faceid_pipe_);
         face_roi_ = create_tensor(kFaceSize, kFaceSize, SSNE_Y_8, SSNE_BUF_AI);
         face_input_ = create_tensor(kFaceSize, kFaceSize, SSNE_RGB, SSNE_BUF_AI);
         faceid_ready_ = faceid_model_id_ != eyedet_model_id_ &&
-                        face_inputs == 1 && face_dtype_ret == 0 && face_set_norm_ret == 0 &&
+                        face_inputs == 1 && face_dtype_ret == 0 &&
                         get_data(face_roi_) != nullptr && get_data(face_input_) != nullptr &&
                         get_width(face_input_) == kFaceSize && get_height(face_input_) == kFaceSize &&
                         get_data_format(face_input_) == SSNE_RGB &&
                         get_mem_size(face_input_) >= static_cast<size_t>(3 * kFaceSize * kFaceSize);
         printf("[FACEID] model=%s id=%u inputs=%d dtype=%d dtype_ret=%d "
-               "norm_ret=%d set_norm_ret=%d mean=%d,%d,%d std=%d,%d,%d uint8=%d ready=%d\n",
+               "norm_ret=%d pipe=clear(no_normalize) mean=%d,%d,%d std=%d,%d,%d uint8=%d ready=%d\n",
                faceid_path.c_str(), faceid_model_id_, face_inputs, face_dtype, face_dtype_ret,
-               face_norm_ret, face_set_norm_ret, face_mean[0], face_mean[1], face_mean[2],
+               face_norm_ret, face_mean[0], face_mean[1], face_mean[2],
                face_std[0], face_std[1], face_std[2], face_uint8, faceid_ready_ ? 1 : 0);
         if (get_data(face_input_) != nullptr) {
             printf("[INPUT][FACEID] %ux%u dtype=%u format=%u bytes=%zu\n",
@@ -146,17 +187,35 @@ bool EyeDetFaceIdEngine::PrepareEyeDetInput(const uint8_t* src) {
     uint8_t* canvas = static_cast<uint8_t*>(get_data(det_canvas_));
     if (src == nullptr || canvas == nullptr) return false;
     std::memset(canvas, 0, static_cast<size_t>(kDetSize * kDetSize));
-    const float inv_scale_x = static_cast<float>(capture_w_) / static_cast<float>(letterbox_w_);
-    const float inv_scale_y = static_cast<float>(capture_h_) / static_cast<float>(letterbox_h_);
     for (int y = 0; y < letterbox_h_; ++y) {
-        const float sy = (static_cast<float>(y) + 0.5f) * inv_scale_y - 0.5f;
+        const uint8_t* row0 = src + resize_y0_[y] * capture_w_;
+        const uint8_t* row1 = src + resize_y1_[y] * capture_w_;
+        const uint32_t wy = resize_wy_[y];
+        const uint32_t inv_wy = 256u - wy;
         uint8_t* row = canvas + y * kDetSize;
         for (int x = 0; x < letterbox_w_; ++x) {
-            const float sx = (static_cast<float>(x) + 0.5f) * inv_scale_x - 0.5f;
-            row[x] = BilinearGray(src, capture_w_, capture_h_, sx, sy);
+            const uint32_t wx = resize_wx_[x];
+            const uint32_t inv_wx = 256u - wx;
+            const uint32_t top =
+                row0[resize_x0_[x]] * inv_wx + row0[resize_x1_[x]] * wx;
+            const uint32_t bottom =
+                row1[resize_x0_[x]] * inv_wx + row1[resize_x1_[x]] * wx;
+            row[x] = static_cast<uint8_t>(
+                (top * inv_wy + bottom * wy + 32768u) >> 16);
         }
     }
-    return RunAiPreprocessPipe(eyedet_pipe_, det_canvas_, det_input_) == 0;
+    const int ret = RunAiPreprocessPipe(eyedet_pipe_, det_canvas_, det_input_);
+    if (ret == 0 && !det_preprocess_logged_) {
+        PrintByteDistribution("capture_y8", src,
+                              static_cast<size_t>(capture_w_ * capture_h_));
+        PrintByteDistribution("letterbox_y8", canvas,
+                              static_cast<size_t>(kDetSize * kDetSize));
+        PrintByteDistribution("model_rgb_storage",
+                              static_cast<const uint8_t*>(get_data(det_input_)),
+                              get_mem_size(det_input_));
+        det_preprocess_logged_ = true;
+    }
+    return ret == 0;
 }
 
 float EyeDetFaceIdEngine::Sigmoid(float x) {
@@ -175,6 +234,18 @@ float EyeDetFaceIdEngine::IoU(const EyeBox& a, const EyeBox& b) {
     const float area_b = std::max(0.0f, b.Width()) * std::max(0.0f, b.Height());
     const float denom = area_a + area_b - inter;
     return denom > 0.0f ? inter / denom : 0.0f;
+}
+
+float EyeDetFaceIdEngine::IntersectionOverMinArea(const EyeBox& a, const EyeBox& b) {
+    const float x1 = std::max(a.x1, b.x1);
+    const float y1 = std::max(a.y1, b.y1);
+    const float x2 = std::min(a.x2, b.x2);
+    const float y2 = std::min(a.y2, b.y2);
+    const float inter = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
+    const float area_a = std::max(0.0f, a.Width()) * std::max(0.0f, a.Height());
+    const float area_b = std::max(0.0f, b.Width()) * std::max(0.0f, b.Height());
+    const float min_area = std::min(area_a, area_b);
+    return min_area > 0.0f ? inter / min_area : 0.0f;
 }
 
 bool EyeDetFaceIdEngine::ValidateEyeDetOutputs() {
@@ -207,13 +278,17 @@ void EyeDetFaceIdEngine::DecodeHead(const float* cls,
                                     int width,
                                     int height,
                                     int stride,
-                                    std::vector<EyeBox>* candidates) const {
+                                    std::vector<EyeBox>* candidates,
+                                    float* max_class_score) const {
     if (cls == nullptr || reg == nullptr || candidates == nullptr) return;
     float softmax[16];
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             const int spatial = y * width + x;
             const float score = Sigmoid(cls[spatial]);
+            if (max_class_score != nullptr) {
+                *max_class_score = std::max(*max_class_score, score);
+            }
             if (score < kEyeScoreThreshold) continue;
             float dist[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             for (int side = 0; side < 4; ++side) {
@@ -255,7 +330,12 @@ void EyeDetFaceIdEngine::NmsAndMap(const std::vector<EyeBox>& candidates,
         const int idx = order[i];
         bool suppressed = false;
         for (size_t k = 0; k < keep.size(); ++k) {
-            if (IoU(candidates[idx], candidates[keep[k]]) > kNmsThreshold) {
+            const EyeBox& candidate = candidates[idx];
+            const EyeBox& selected = candidates[keep[k]];
+            const bool overlap_duplicate = IoU(candidate, selected) > kNmsThreshold;
+            const bool nested_duplicate =
+                IntersectionOverMinArea(candidate, selected) > 0.75f;
+            if (overlap_duplicate || nested_duplicate) {
                 suppressed = true;
                 break;
             }
@@ -367,12 +447,16 @@ bool EyeDetFaceIdEngine::DetectEyes(ssne_tensor_t* capture_y8, EyeDetResult* out
     if (out == nullptr) return false;
     out->Clear();
     if (!eyedet_ready_ || capture_y8 == nullptr) return false;
+    const auto total_begin = std::chrono::steady_clock::now();
     const uint8_t* src = static_cast<const uint8_t*>(get_data(*capture_y8));
     if (src == nullptr || !PrepareEyeDetInput(src)) {
         ++det_failures_;
         return false;
     }
-    const auto begin = std::chrono::steady_clock::now();
+    const auto preprocess_end = std::chrono::steady_clock::now();
+    out->preprocess_ms =
+        std::chrono::duration<float, std::milli>(preprocess_end - total_begin).count();
+    const auto begin = preprocess_end;
     ssne_tensor_t input[1] = {det_input_};
     const int infer_ret = ssne_inference(eyedet_model_id_, 1, input);
     if (infer_ret != 0) {
@@ -393,14 +477,23 @@ bool EyeDetFaceIdEngine::DetectEyes(ssne_tensor_t* capture_y8, EyeDetResult* out
     std::vector<EyeBox> candidates;
     candidates.reserve(256);
     DecodeHead(static_cast<const float*>(get_data(det_outputs_[0])),
-               static_cast<const float*>(get_data(det_outputs_[3])), 80, 80, 8, &candidates);
+               static_cast<const float*>(get_data(det_outputs_[3])), 80, 80, 8, &candidates,
+               &out->max_class_score);
     DecodeHead(static_cast<const float*>(get_data(det_outputs_[1])),
-               static_cast<const float*>(get_data(det_outputs_[4])), 40, 40, 16, &candidates);
+               static_cast<const float*>(get_data(det_outputs_[4])), 40, 40, 16, &candidates,
+               &out->max_class_score);
     DecodeHead(static_cast<const float*>(get_data(det_outputs_[2])),
-               static_cast<const float*>(get_data(det_outputs_[5])), 20, 20, 32, &candidates);
+               static_cast<const float*>(get_data(det_outputs_[5])), 20, 20, 32, &candidates,
+               &out->max_class_score);
+    out->candidates_before_nms = static_cast<int>(candidates.size());
     NmsAndMap(candidates, &out->eyes);
     PairEyes(out->eyes, &out->pairs);
     SelectPair(out);
+    const auto total_end = std::chrono::steady_clock::now();
+    out->postprocess_ms =
+        std::chrono::duration<float, std::milli>(total_end - end).count();
+    out->total_ms =
+        std::chrono::duration<float, std::milli>(total_end - total_begin).count();
     return true;
 }
 
@@ -558,8 +651,8 @@ bool EyeDetFaceIdEngine::Identify(const uint8_t* capture_y8,
     out->Clear();
     out->enrolled = prototype_valid_;
     out->enrolled_count = EnrollmentCount();
-    if (!faceid_ready_ || pair.track_id == 0 ||
-        (enrolling_ && pair.track_id != enroll_track_id_) ||
+    if (!faceid_ready_ ||
+        (enrolling_ && (pair.track_id == 0 || pair.track_id != enroll_track_id_)) ||
         !BuildFaceRoi(capture_y8, width, height, pair)) {
         return false;
     }
@@ -641,5 +734,12 @@ void EyeDetFaceIdEngine::Release() {
     eyedet_ready_ = false;
     faceid_ready_ = false;
     det_contract_logged_ = false;
+    det_preprocess_logged_ = false;
     face_contract_logged_ = false;
+    resize_x0_.clear();
+    resize_x1_.clear();
+    resize_y0_.clear();
+    resize_y1_.clear();
+    resize_wx_.clear();
+    resize_wy_.clear();
 }

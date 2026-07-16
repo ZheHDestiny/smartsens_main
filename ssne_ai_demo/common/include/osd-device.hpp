@@ -69,7 +69,7 @@ inline int osd_flush_texture_layer(handle_t, ssLAYER_HANDLE) { return 0; }
 #include "common.hpp"
 
 #define BUFFER_TYPE_DMABUF  0x1
-#define OSD_LAYER_SIZE 5  
+#define OSD_LAYER_SIZE 6
 
 namespace sst {
 namespace device {
@@ -96,6 +96,7 @@ public:
     void Draw(std::vector<OsdQuadRangle> &quad_rangle);
     void Draw(std::vector<std::array<float, 4>>& boxes, int border, int layer_id, fdevice::QUADRANGLETYPE type, fdevice::ALPHATYPE alpha, int color);
     void Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id);
+    void ClearLayer(int layer_id);
     void DrawTexture(const char* bitmap_path, const char* lut_path, int layer_id, int pos_x = 0, int pos_y = 0, fdevice::ALPHATYPE alpha = fdevice::TYPE_ALPHA100);
 
 private:

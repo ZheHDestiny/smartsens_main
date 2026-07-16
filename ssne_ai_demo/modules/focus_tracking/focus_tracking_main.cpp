@@ -9,12 +9,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -29,6 +27,111 @@ static bool g_focus_reset = false;
 static bool g_focus_enroll = false;
 static bool g_focus_clear_id = false;
 static std::mutex g_focus_mtx;
+
+class FocusTimingWindow {
+public:
+    void Add(float value_ms) {
+        if (!std::isfinite(value_ms) || value_ms < 0.0f) return;
+        values_[next_] = value_ms;
+        next_ = (next_ + 1) % values_.size();
+        if (count_ < values_.size()) ++count_;
+    }
+
+    float Mean() const {
+        if (count_ == 0) return 0.0f;
+        float sum = 0.0f;
+        for (size_t i = 0; i < count_; ++i) sum += values_[i];
+        return sum / static_cast<float>(count_);
+    }
+
+    float Percentile(float percentile) const {
+        if (count_ == 0) return 0.0f;
+        std::array<float, 120> sorted = values_;
+        std::sort(sorted.begin(), sorted.begin() + count_);
+        const float clamped = std::max(0.0f, std::min(1.0f, percentile));
+        const size_t index = static_cast<size_t>(
+            std::ceil(clamped * static_cast<float>(count_)) - 1.0f);
+        return sorted[std::min(index, count_ - 1)];
+    }
+
+private:
+    std::array<float, 120> values_ = {};
+    size_t next_ = 0;
+    size_t count_ = 0;
+};
+
+struct ReIdTrackState {
+    uint64_t id = 0;
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float eye_distance = 0.0f;
+    float similarity = 0.0f;
+    int stable_hits = 0;
+    uint32_t last_seen_frame = 0;
+    uint32_t last_eval_frame = 0;
+};
+
+static ReIdTrackState* find_reid_track(vector<ReIdTrackState>* tracks, uint64_t id) {
+    if (tracks == nullptr) return nullptr;
+    for (size_t i = 0; i < tracks->size(); ++i) {
+        if ((*tracks)[i].id == id) return &(*tracks)[i];
+    }
+    return nullptr;
+}
+
+static void assign_reid_tracks(vector<EyePair>* pairs,
+                               vector<ReIdTrackState>* tracks,
+                               uint64_t* next_track_id,
+                               uint32_t frame_count) {
+    if (pairs == nullptr || tracks == nullptr || next_track_id == nullptr) return;
+    vector<bool> used(tracks->size(), false);
+    for (size_t p = 0; p < pairs->size(); ++p) {
+        EyePair& pair = (*pairs)[p];
+        int best = -1;
+        float best_distance = 1e9f;
+        for (size_t t = 0; t < tracks->size(); ++t) {
+            if (used[t] || frame_count - (*tracks)[t].last_seen_frame > 20) continue;
+            const float dx = pair.Cx() - (*tracks)[t].cx;
+            const float dy = pair.Cy() - (*tracks)[t].cy;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float limit = std::max(80.0f, 1.6f * (*tracks)[t].eye_distance);
+            if (distance < limit && distance < best_distance) {
+                best = static_cast<int>(t);
+                best_distance = distance;
+            }
+        }
+        if (best < 0) {
+            ReIdTrackState state;
+            state.id = (*next_track_id)++;
+            state.cx = pair.Cx();
+            state.cy = pair.Cy();
+            state.eye_distance = pair.EyeDistance();
+            state.last_seen_frame = frame_count;
+            tracks->push_back(state);
+            used.push_back(true);
+            pair.track_id = state.id;
+        } else {
+            ReIdTrackState& state = (*tracks)[best];
+            state.cx = pair.Cx();
+            state.cy = pair.Cy();
+            state.eye_distance = pair.EyeDistance();
+            state.last_seen_frame = frame_count;
+            used[best] = true;
+            pair.track_id = state.id;
+        }
+    }
+    tracks->erase(std::remove_if(tracks->begin(), tracks->end(),
+        [frame_count](const ReIdTrackState& state) {
+            return frame_count - state.last_seen_frame > 45;
+        }), tracks->end());
+}
+
+static int find_pair_by_track_id(const vector<EyePair>& pairs, uint64_t track_id) {
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        if (pairs[i].track_id == track_id) return static_cast<int>(i);
+    }
+    return -1;
+}
 
 static const char* focus_mode_name(FocusTrackingMode mode) {
     switch (mode) {
@@ -84,21 +187,6 @@ static bool choose_focus_mode(FocusTrackingMode* mode) {
         cout << "\n[提示] 无效的追焦子功能选项 (" << choice << ")，请重新选择。\n";
     }
 
-    return false;
-}
-
-static bool dev_exists_focus(const char* path) {
-    struct stat st;
-    return stat(path, &st) == 0;
-}
-
-static bool module_loaded_focus(const char* mod) {
-    std::ifstream f("/proc/modules");
-    if (!f) return false;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.rfind(mod, 0) == 0) return true;
-    }
     return false;
 }
 
@@ -187,21 +275,6 @@ static void resize_gray_nearest(const uint8_t* src,
             dst_row[x] = src_row[src_x];
         }
     }
-}
-
-static FocusTargetState scale_target_to_proc(const FocusTargetState& src,
-                                             int src_w,
-                                             int src_h,
-                                             int dst_w,
-                                             int dst_h) {
-    FocusTargetState dst = src;
-    dst.x = src.x * dst_w / src_w;
-    dst.y = src.y * dst_h / src_h;
-    dst.w = std::max(1, src.w * dst_w / src_w);
-    dst.h = std::max(1, src.h * dst_h / src_h);
-    dst.cx = src.cx * (float)dst_w / (float)src_w;
-    dst.cy = src.cy * (float)dst_h / (float)src_h;
-    return dst;
 }
 
 static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
@@ -298,12 +371,21 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     }
 
     VISUALIZER visualizer;
-    bool osd_present = module_loaded_focus("osd_kmod") ||
-                       dev_exists_focus("/dev/osddev") ||
-                       dev_exists_focus("/dev/osd0");
-    if (osd_present) {
-        visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+    // Other main demos initialize the visualizer directly.  Do the same here:
+    // device-name probing is not reliable across board images, while
+    // VISUALIZER itself reports a precise initialization failure if OSD is off.
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+    const std::array<float, 4> focus_fov = {
+        static_cast<float>(crop_x1), static_cast<float>(crop_y1),
+        static_cast<float>(crop_x2 - 1), static_cast<float>(crop_y2 - 1)};
+    if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+        visualizer.DrawFocusFov(focus_fov);
+        visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
+        visualizer.DrawFocusConfidence(0.0f, 0.0f);
+        visualizer.DrawFocusEnrollmentFlash(focus_fov, false);
     }
+    printf("[FOCUS_OSD] requested capture FOV sensor=(%d,%d)-(%d,%d)\n",
+           crop_x1, crop_y1, crop_x2 - 1, crop_y2 - 1);
 
     printf("[配置] sensor=%dx%d crop=(%d,%d)-(%d,%d) capture=%dx%d proc=%dx%d\n",
            sensor_w, sensor_h, crop_x1, crop_y1, crop_x2, crop_y2, capture_w, capture_h, proc_w, proc_h);
@@ -319,28 +401,54 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     EyeDetResult eye_result;
     IdentityResult identity_result;
     uint64_t identity_track_id = 0;
+    uint64_t tracker_seed_track_id = 0;
+    vector<ReIdTrackState> reid_tracks;
+    uint64_t next_reid_track_id = 1;
+    uint64_t reid_locked_track_id = 0;
+    uint32_t reid_locked_missing_frames = 0;
+    size_t reid_round_robin = 0;
+    float reid_display_similarity = 0.0f;
     auto last_identity_time = chrono::steady_clock::now() - chrono::seconds(10);
     uint64_t faceid_runs = 0;
-    float faceid_total_ms = 0.0f;
 
     uint32_t frame_count = 0;
     uint32_t locked_count = 0;
-    uint32_t last_log_frame = 0;
     uint32_t last_recover_successes = 0;
     bool last_osd_locked = false;
+    bool last_osd_identity_matched = false;
+    bool last_enrollment_flash_visible = false;
+    int enrollment_complete_flash_frames = 0;
+    bool has_last_result_time = false;
     auto start_time = chrono::steady_clock::now();
-    chrono::steady_clock::time_point frame_times[10];
-    for (int i = 0; i < 10; i++) frame_times[i] = start_time;
+    auto last_result_time = start_time;
+    auto last_summary_time = start_time;
+
+    FocusTimingWindow frame_period_ms;
+    FocusTimingWindow result_latency_ms;
+    FocusTimingWindow capture_ms;
+    FocusTimingWindow preprocess_ms;
+    FocusTimingWindow npu_ms;
+    FocusTimingWindow postprocess_ms;
+    FocusTimingWindow tracker_ms;
+    FocusTimingWindow faceid_ms;
+    FocusTimingWindow osd_ms;
+
+    const uint32_t tracker_refresh_interval = 5;
+    const uint32_t osd_refresh_interval = 3;
 
     {
         SigintBlocker blocker;
         while (!focus_should_exit()) {
+            bool enrollment_sample_accepted = false;
             if (focus_is_paused()) {
+                has_last_result_time = false;
                 usleep(50000);
                 continue;
             }
 
+            const auto capture_begin = chrono::steady_clock::now();
             image_processor.GetImage(&curr_frame);
+            const auto capture_end = chrono::steady_clock::now();
             ImagePipelineHealthSnapshot health = image_processor.GetHealthSnapshot();
             if (health.recover_successes != last_recover_successes) {
                 last_recover_successes = health.recover_successes;
@@ -349,12 +457,19 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 smart_engine.ResetSession();
                 identity_result.Clear();
                 identity_track_id = 0;
-                if (osd_present && last_osd_locked) {
-                    vector<array<float, 4>> empty_boxes;
-                    vector<float> empty_scores;
-                    vector<int> empty_ids;
-                    visualizer.Draw(empty_boxes, empty_scores, empty_ids);
+                tracker_seed_track_id = 0;
+                reid_tracks.clear();
+                reid_locked_track_id = 0;
+                reid_locked_missing_frames = 0;
+                reid_display_similarity = 0.0f;
+                last_osd_identity_matched = false;
+                if (last_osd_locked) {
+                    EyeDetResult empty_result;
+                    visualizer.DrawFocusEyes(empty_result, false, crop_x1, crop_y1);
                     last_osd_locked = false;
+                }
+                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                    visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
                 }
                 if (RuntimeLogEnabled()) {
                     printf("[追焦] camera pipeline 已恢复，清空旧目标并重新选择。\n");
@@ -369,9 +484,18 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 usleep(5000);
                 continue;
             }
-
-            resize_gray_nearest(capture_ptr, capture_w, capture_h, proc_frame.data(), proc_w, proc_h);
-            uint8_t* frame_ptr = proc_frame.data();
+            capture_ms.Add(
+                chrono::duration<float, milli>(capture_end - capture_begin).count());
+            const auto processing_begin = capture_end;
+            bool proc_frame_ready = false;
+            auto ensure_proc_frame = [&]() -> uint8_t* {
+                if (!proc_frame_ready) {
+                    resize_gray_nearest(capture_ptr, capture_w, capture_h,
+                                        proc_frame.data(), proc_w, proc_h);
+                    proc_frame_ready = true;
+                }
+                return proc_frame.data();
+            };
 
             if (focus_take_reset_request()) {
                 tracker.Reset();
@@ -379,6 +503,15 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 smart_engine.ResetSession();
                 identity_result.Clear();
                 identity_track_id = 0;
+                tracker_seed_track_id = 0;
+                reid_tracks.clear();
+                reid_locked_track_id = 0;
+                reid_locked_missing_frames = 0;
+                reid_display_similarity = 0.0f;
+                last_osd_identity_matched = false;
+                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                    visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
+                }
                 printf("[追焦] 已重置锁定目标，下一帧重新选择。\n");
             }
 
@@ -386,15 +519,92 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 smart_engine.ClearEnrollment();
                 identity_result.Clear();
                 identity_track_id = 0;
+                last_osd_identity_matched = false;
+                reid_tracks.clear();
+                reid_locked_track_id = 0;
+                reid_locked_missing_frames = 0;
+                reid_display_similarity = 0.0f;
+                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                    visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
+                }
                 printf("[FACEID] 已清除 id_tmp、录入样本和身份显示。\n");
             }
 
-            frame_times[frame_count % 10] = chrono::steady_clock::now();
             frame_count++;
 
             bool locked = false;
             if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
                 const bool det_ok = smart_engine.DetectEyes(&curr_frame, &eye_result);
+                if (det_ok) {
+                    preprocess_ms.Add(eye_result.preprocess_ms);
+                    npu_ms.Add(eye_result.npu_ms);
+                    postprocess_ms.Add(eye_result.postprocess_ms);
+                }
+                const bool reid_mode = smart_engine.HasEnrollment() && !smart_engine.IsEnrolling();
+                if (det_ok && reid_mode) {
+                    assign_reid_tracks(&eye_result.pairs, &reid_tracks,
+                                       &next_reid_track_id, frame_count);
+                    if (!eye_result.pairs.empty()) {
+                        const size_t reid_index = reid_round_robin % eye_result.pairs.size();
+                        ++reid_round_robin;
+                        EyePair& reid_pair = eye_result.pairs[reid_index];
+                        IdentityResult reid_result;
+                        const auto face_begin = chrono::steady_clock::now();
+                        if (smart_engine.Identify(capture_ptr, capture_w, capture_h,
+                                                 reid_pair, &reid_result)) {
+                            ReIdTrackState* state = find_reid_track(&reid_tracks,
+                                                                      reid_pair.track_id);
+                            if (state != nullptr) {
+                                state->similarity = state->last_eval_frame == 0
+                                    ? reid_result.similarity
+                                    : 0.65f * state->similarity + 0.35f * reid_result.similarity;
+                                state->last_eval_frame = frame_count;
+                                if (state->similarity >= 0.75f) {
+                                    ++state->stable_hits;
+                                } else {
+                                    state->stable_hits = 0;
+                                }
+                                if (state->stable_hits >= 2) {
+                                    if (reid_locked_track_id != state->id) {
+                                        printf("[REID] auto-lock track=%llu sim=%.3f hits=%d\n",
+                                               static_cast<unsigned long long>(state->id),
+                                               state->similarity, state->stable_hits);
+                                    }
+                                    reid_locked_track_id = state->id;
+                                    reid_locked_missing_frames = 0;
+                                    reid_display_similarity = state->similarity;
+                                    identity_result = reid_result;
+                                    identity_result.similarity = state->similarity;
+                                    identity_track_id = state->id;
+                                    last_identity_time = chrono::steady_clock::now();
+                                } else if (reid_locked_track_id == state->id) {
+                                    reid_display_similarity = state->similarity;
+                                }
+                            }
+                            ++faceid_runs;
+                        }
+                        const auto face_end = chrono::steady_clock::now();
+                        faceid_ms.Add(chrono::duration<float, milli>(
+                            face_end - face_begin).count());
+                    }
+
+                    if (reid_locked_track_id != 0) {
+                        const int locked_index = find_pair_by_track_id(
+                            eye_result.pairs, reid_locked_track_id);
+                        if (locked_index >= 0) {
+                            eye_result.selected_index = locked_index;
+                            reid_locked_missing_frames = 0;
+                        } else if (++reid_locked_missing_frames <= 15) {
+                            // Preserve the existing tracker target through a short occlusion.
+                            eye_result.selected_index = -1;
+                        } else {
+                            printf("[REID] lock expired track=%llu\n",
+                                   static_cast<unsigned long long>(reid_locked_track_id));
+                            reid_locked_track_id = 0;
+                            reid_display_similarity = 0.0f;
+                        }
+                    }
+                }
                 if (det_ok && eye_result.selected_index >= 0) {
                     EyePair& pair = eye_result.pairs[eye_result.selected_index];
                     const float eye_distance = pair.EyeDistance();
@@ -407,26 +617,67 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                         detected_target.cx - 0.5f * tracker_config.target_w));
                     detected_target.y = static_cast<int>(std::round(
                         detected_target.cy - 0.5f * tracker_config.target_h));
+                    detected_target.x = std::max(
+                        0, std::min(detected_target.x, proc_w - tracker_config.target_w));
+                    detected_target.y = std::max(
+                        0, std::min(detected_target.y, proc_h - tracker_config.target_h));
+                    detected_target.cx =
+                        detected_target.x + 0.5f * tracker_config.target_w;
+                    detected_target.cy =
+                        detected_target.y + 0.5f * tracker_config.target_h;
                     detected_target.confidence = 0.5f * (pair.left.score + pair.right.score);
-                    tracker.SetTarget(frame_ptr, detected_target);
+                    detected_target.locked = true;
+                    detected_target.age = target.age + 1;
+                    detected_target.lost_frames = 0;
+                    target = detected_target;
+                    locked = true;
 
-                    if (identity_track_id != 0 && identity_track_id != pair.track_id) {
+                    if (!tracker.HasTarget() ||
+                        tracker_seed_track_id != pair.track_id ||
+                        frame_count % tracker_refresh_interval == 0) {
+                        const auto tracker_begin = chrono::steady_clock::now();
+                        tracker.SetTarget(ensure_proc_frame(), detected_target);
+                        tracker_seed_track_id = pair.track_id;
+                        const auto tracker_end = chrono::steady_clock::now();
+                        tracker_ms.Add(chrono::duration<float, milli>(
+                            tracker_end - tracker_begin).count());
+                    }
+
+                    if (!reid_mode && identity_track_id != 0 && identity_track_id != pair.track_id) {
                         identity_result.Clear();
                         identity_track_id = 0;
                     }
-                    if (frame_count == 1 || frame_count % 6 == 0 || smart_engine.IsEnrolling()) {
+                    if (!reid_mode &&
+                        (frame_count == 1 || frame_count % 6 == 0 || smart_engine.IsEnrolling())) {
                         IdentityResult next_identity;
+                        const int samples_before = smart_engine.EnrollmentCount();
+                        const auto face_begin = chrono::steady_clock::now();
                         if (smart_engine.Identify(capture_ptr, capture_w, capture_h,
                                                  pair, &next_identity)) {
+                            enrollment_sample_accepted =
+                                next_identity.enrolled_count > samples_before;
+                            if (enrollment_sample_accepted && next_identity.enrolled) {
+                                enrollment_complete_flash_frames = 4;
+                            }
                             identity_result = next_identity;
                             identity_track_id = pair.track_id;
                             last_identity_time = chrono::steady_clock::now();
                             ++faceid_runs;
-                            faceid_total_ms += next_identity.npu_ms;
                         }
+                        const auto face_end = chrono::steady_clock::now();
+                        faceid_ms.Add(chrono::duration<float, milli>(
+                            face_end - face_begin).count());
                     }
                 } else if (det_ok && eye_result.lost_frames > 15) {
                     tracker.Reset();
+                    tracker_seed_track_id = 0;
+                    target.Clear();
+                } else if (tracker.HasTarget()) {
+                    const auto tracker_begin = chrono::steady_clock::now();
+                    locked = tracker.Update(ensure_proc_frame(), &target);
+                    const auto tracker_end = chrono::steady_clock::now();
+                    tracker_ms.Add(chrono::duration<float, milli>(
+                        tracker_end - tracker_begin).count());
                 }
                 if (focus_take_enroll_request()) {
                     if (!smart_engine.BeginEnroll()) {
@@ -436,35 +687,62 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                         identity_track_id = smart_engine.SelectedTrackId();
                     }
                 }
-                const auto identity_age = chrono::duration_cast<chrono::milliseconds>(
-                    chrono::steady_clock::now() - last_identity_time).count();
-                if (identity_age > 800) {
-                    identity_result.Clear();
-                    identity_result.expired = true;
+                if (!reid_mode) {
+                    const auto identity_age = chrono::duration_cast<chrono::milliseconds>(
+                        chrono::steady_clock::now() - last_identity_time).count();
+                    if (identity_age > 800) {
+                        identity_result.Clear();
+                        identity_result.expired = true;
+                    }
                 }
-                locked = tracker.HasTarget() && tracker.Update(frame_ptr, &target);
             } else {
                 focus_take_enroll_request();
-                locked = tracker.Update(frame_ptr, &target);
+                const auto tracker_begin = chrono::steady_clock::now();
+                locked = tracker.Update(ensure_proc_frame(), &target);
+                const auto tracker_end = chrono::steady_clock::now();
+                tracker_ms.Add(chrono::duration<float, milli>(
+                    tracker_end - tracker_begin).count());
             }
             if (locked) locked_count++;
 
-            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET && osd_present &&
-                !eye_result.eyes.empty()) {
-                vector<array<float, 4>> focus_boxes;
-                vector<float> focus_scores;
-                vector<int> focus_class_ids;
-                for (size_t i = 0; i < eye_result.eyes.size(); ++i) {
-                    const EyeBox& eye = eye_result.eyes[i];
-                    focus_boxes.push_back({eye.x1 + crop_x1, eye.y1 + crop_y1,
-                                           eye.x2 + crop_x1, eye.y2 + crop_y1});
-                    focus_scores.push_back(eye.score);
-                    focus_class_ids.push_back(0);
+            const auto osd_begin = chrono::steady_clock::now();
+            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                const bool enrollment_flash_visible = enrollment_sample_accepted ||
+                    enrollment_complete_flash_frames > 0;
+                if (enrollment_flash_visible != last_enrollment_flash_visible) {
+                    visualizer.DrawFocusEnrollmentFlash(focus_fov, enrollment_flash_visible);
+                    last_enrollment_flash_visible = enrollment_flash_visible;
                 }
-                visualizer.Draw(focus_boxes, focus_scores, focus_class_ids);
-                last_osd_locked = true;
+                if (enrollment_complete_flash_frames > 0) {
+                    --enrollment_complete_flash_frames;
+                }
+                const bool reid_mode = smart_engine.HasEnrollment() && !smart_engine.IsEnrolling();
+                const bool identity_matched = reid_mode
+                    ? reid_locked_track_id != 0
+                    : (identity_result.valid && !identity_result.expired);
+                if (identity_matched != last_osd_identity_matched) {
+                    visualizer.DrawFocusIdentity(identity_matched,
+                                                 crop_x2 - 1, crop_y1);
+                    last_osd_identity_matched = identity_matched;
+                }
+                if (frame_count == 1 || frame_count % osd_refresh_interval == 0) {
+                    visualizer.DrawFocusEyes(eye_result, identity_matched,
+                                             crop_x1, crop_y1);
+                    float eye_confidence = 0.0f;
+                    if (eye_result.selected_index >= 0 &&
+                        eye_result.selected_index < static_cast<int>(eye_result.pairs.size())) {
+                        const EyePair& selected = eye_result.pairs[eye_result.selected_index];
+                        eye_confidence = 0.5f * (selected.left.score + selected.right.score);
+                    }
+                    const float identity_confidence = reid_mode
+                        ? reid_display_similarity
+                        : (identity_result.enrolled && !identity_result.expired
+                            ? identity_result.similarity : 0.0f);
+                    visualizer.DrawFocusConfidence(eye_confidence, identity_confidence);
+                    last_osd_locked = !eye_result.eyes.empty();
+                }
             } else if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER &&
-                       locked && osd_present) {
+                       locked) {
                 int sx1 = crop_x1 + target.x * (crop_x2 - crop_x1) / proc_w;
                 int sy1 = crop_y1 + target.y * (crop_y2 - crop_y1) / proc_h;
                 int sx2 = crop_x1 + (target.x + target.w) * (crop_x2 - crop_x1) / proc_w;
@@ -477,39 +755,46 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 focus_class_ids.push_back(0);
                 visualizer.Draw(focus_boxes, focus_scores, focus_class_ids);
                 last_osd_locked = true;
-            } else if (!locked && osd_present && last_osd_locked) {
+            } else if (!locked && last_osd_locked) {
                 vector<array<float, 4>> empty_boxes;
                 vector<float> empty_scores;
                 vector<int> empty_ids;
                 visualizer.Draw(empty_boxes, empty_scores, empty_ids);
                 last_osd_locked = false;
             }
+            const auto osd_end = chrono::steady_clock::now();
+            osd_ms.Add(chrono::duration<float, milli>(osd_end - osd_begin).count());
 
-            if (frame_count - last_log_frame >= 30) {
-                int calc_frames = frame_count < 10 ? frame_count : 10;
-                auto now = frame_times[(frame_count - 1) % 10];
-                auto old = frame_times[frame_count % 10];
-                chrono::duration<float> diff = now - old;
-                float fps = (diff.count() > 0.001f && calc_frames > 0) ?
-                            ((float)calc_frames / diff.count()) : 0.0f;
-                float dx = locked ? (target.cx - 0.5f * (float)proc_w) : 0.0f;
-                float dy = locked ? (target.cy - 0.5f * (float)proc_h) : 0.0f;
-                printf("[追焦] f=%u fps=%4.1f lock=%d conf=%.2f focus=%.1f dx=%.1f dy=%.1f lost=%d\n",
-                       frame_count, fps, locked ? 1 : 0, target.confidence,
-                       target.focus_score, dx, dy, target.lost_frames);
-                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
-                    printf("[EYEDET] fps=%4.1f npu_ms=%.2f eyes=%zu pairs=%zu track=%llu lost=%d\n",
-                           fps, eye_result.npu_ms, eye_result.eyes.size(), eye_result.pairs.size(),
-                           static_cast<unsigned long long>(smart_engine.SelectedTrackId()),
-                           eye_result.lost_frames);
-                    printf("[FACEID] runs=%llu avg_ms=%.2f samples=%d sim=%.4f label=%s%s\n",
-                           static_cast<unsigned long long>(faceid_runs),
-                           faceid_runs > 0 ? faceid_total_ms / faceid_runs : 0.0f,
-                           smart_engine.EnrollmentCount(), identity_result.similarity,
-                           identity_result.label.c_str(),
-                           identity_result.expired ? " expired" : "");
+            const auto result_time = chrono::steady_clock::now();
+            result_latency_ms.Add(chrono::duration<float, milli>(
+                result_time - processing_begin).count());
+            if (has_last_result_time) {
+                frame_period_ms.Add(chrono::duration<float, milli>(
+                    result_time - last_result_time).count());
+            }
+            last_result_time = result_time;
+            has_last_result_time = true;
+
+            if (RuntimeLogEnabled() &&
+                chrono::duration_cast<chrono::milliseconds>(
+                    result_time - last_summary_time).count() >= 1000) {
+                const float mean_period = frame_period_ms.Mean();
+                const float fps = mean_period > 0.001f ? 1000.0f / mean_period : 0.0f;
+                const char* id_label =
+                    (identity_result.valid && !identity_result.expired) ? "id_tmp" : "unknown";
+                printf("[FOCUS] fps=%.1f p95=%.1fms eyes=%zu pairs=%zu score=%.3f id=%s face_runs=%llu lost=%d\n",
+                       fps, result_latency_ms.Percentile(0.95f),
+                       eye_result.eyes.size(), eye_result.pairs.size(),
+                       eye_result.max_class_score, id_label,
+                       static_cast<unsigned long long>(faceid_runs),
+                       eye_result.lost_frames);
+                if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                    printf("[FOCUS_PROF] capture=%.2f pre=%.2f npu=%.2f post=%.2f tracker=%.2f face=%.2f osd=%.2f period_p95=%.2f\n",
+                           capture_ms.Mean(), preprocess_ms.Mean(), npu_ms.Mean(),
+                           postprocess_ms.Mean(), tracker_ms.Mean(), faceid_ms.Mean(),
+                           osd_ms.Mean(), frame_period_ms.Percentile(0.95f));
                 }
-                last_log_frame = frame_count;
+                last_summary_time = result_time;
             }
         }
     }
@@ -520,9 +805,8 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     }
     if (listener_thread.joinable()) listener_thread.join();
 
-    auto end_time = chrono::steady_clock::now();
-    chrono::duration<float> active_time = end_time - start_time;
-    float avg_fps = active_time.count() > 0.001f ? (float)frame_count / active_time.count() : 0.0f;
+    const float mean_period = frame_period_ms.Mean();
+    const float avg_fps = mean_period > 0.001f ? 1000.0f / mean_period : 0.0f;
 
     printf("\n[统计] 追焦结束\n");
     printf("  • 总帧数: %u\n", frame_count);

@@ -40,6 +40,14 @@ public:
     void Draw(const std::vector<std::array<float, 4>>& boxes,
               const std::vector<float>& scores,
               const std::vector<int>& class_ids);
+    void DrawFocusFov(const std::array<float, 4>& fov);
+    void DrawFocusEyes(const EyeDetResult& result,
+                       bool identity_matched,
+                       int offset_x,
+                       int offset_y);
+    void DrawFocusIdentity(bool identity_matched, int fov_right, int fov_top);
+    void DrawFocusConfidence(float eye_confidence, float identity_confidence);
+    void DrawFocusEnrollmentFlash(const std::array<float, 4>& fov, bool visible);
     void DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
                    const std::vector<float>& scores,
                    const std::vector<int>& class_ids,
@@ -69,6 +77,7 @@ private:
     static const int LAYER_BITMAP    = 2;
     static const int LAYER_SAFEDIR   = 3;
     static const int LAYER_MASK      = 4; 
+    static const int LAYER_FACE_ICON = 5;
 
     static const int MAX_FEATURE_MARKERS = 24;
     static const int MAX_FLOW_ARROWS     = 10;

@@ -61,7 +61,10 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
     m_osd_enabled = true;
 
     for (int layer_index = 0; layer_index < OSD_LAYER_SIZE; layer_index++) {
-        int dma_size = (layer_index == 2) ? 0x100000 : 1024;
+        // Vector text and multiple tracking boxes can exceed the historical
+        // 1 KiB graphic-layer buffer.  This allocation is initialization-only.
+        const bool is_image_layer = layer_index == 2 || layer_index == 5;
+        int dma_size = is_image_layer ? 0x100000 : 8192;
         
         osd_alloc_buffer(m_osd_handle, m_layer_dma[layer_index].dma, dma_size);
         usleep(250000); // 等待 DMA 分配稳定
@@ -70,7 +73,7 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
 
         LAYER_ATTR_S osd_layer;
         
-        if (layer_index == 2) {
+        if (is_image_layer) {
             osd_layer.codeTYPE = SS_TYPE_RLE;
             osd_layer.layer_data_RLE.osd_buf.buf_type = BUFFER_TYPE_DMABUF;
             osd_layer.layer_data_RLE.osd_buf.buf.fd_dmabuf = dma_fd;
@@ -212,9 +215,28 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id){
     for(auto &q : quad_rangle){
         GenQrangleBox(q.box, q.border);
         COVER_ATTR_S qrangle_attr = {q.color, q.type, q.alpha, m_qrangle_out, m_qrangle_in};
-        osd_add_quad_rangle_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id, &qrangle_attr);
+        const int ret = osd_add_quad_rangle_layer(
+            m_osd_handle, (ssLAYER_HANDLE)layer_id, &qrangle_attr);
+        if (ret != 0) {
+            std::cerr << "[OsdDevice] ERROR: add quadrangle failed, layer="
+                      << layer_id << " ret=" << ret << std::endl;
+        }
     }
-    osd_flush_quad_rangle_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    const int flush_ret = osd_flush_quad_rangle_layer(
+        m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    if (flush_ret != 0) {
+        std::cerr << "[OsdDevice] ERROR: flush quadrangle failed, layer="
+                  << layer_id << " ret=" << flush_ret << std::endl;
+    }
+}
+
+void OsdDevice::ClearLayer(int layer_id) {
+    if (!m_osd_enabled || layer_id < 0 || layer_id >= OSD_LAYER_SIZE) return;
+    const int ret = osd_clean_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    if (ret != 0) {
+        std::cerr << "[OsdDevice] ERROR: clear layer failed, layer="
+                  << layer_id << " ret=" << ret << std::endl;
+    }
 }
 
 void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int layer_id, fdevice::QUADRANGLETYPE type, fdevice::ALPHATYPE alpha, int color){

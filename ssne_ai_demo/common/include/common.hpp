@@ -504,14 +504,24 @@ struct EyeDetResult {
     std::vector<EyePair> pairs;
     int selected_index = -1;
     int lost_frames = 0;
+    float preprocess_ms = 0.0f;
     float npu_ms = 0.0f;
+    float postprocess_ms = 0.0f;
+    float total_ms = 0.0f;
+    float max_class_score = 0.0f;
+    int candidates_before_nms = 0;
 
     void Clear() {
         eyes.clear();
         pairs.clear();
         selected_index = -1;
         lost_frames = 0;
+        preprocess_ms = 0.0f;
         npu_ms = 0.0f;
+        postprocess_ms = 0.0f;
+        total_ms = 0.0f;
+        max_class_score = 0.0f;
+        candidates_before_nms = 0;
     }
 };
 
@@ -550,6 +560,7 @@ public:
 
     bool IsReady() const { return eyedet_ready_; }
     bool FaceIdReady() const { return faceid_ready_; }
+    bool HasEnrollment() const { return prototype_valid_; }
     bool IsEnrolling() const { return enrolling_; }
     int EnrollmentCount() const { return static_cast<int>(enroll_samples_.size()); }
     uint64_t SelectedTrackId() const { return selected_track_id_; }
@@ -574,12 +585,19 @@ private:
     bool eyedet_ready_ = false;
     bool faceid_ready_ = false;
     bool det_contract_logged_ = false;
+    bool det_preprocess_logged_ = false;
     bool face_contract_logged_ = false;
     int capture_w_ = 0;
     int capture_h_ = 0;
     float letterbox_scale_ = 1.0f;
     int letterbox_w_ = 0;
     int letterbox_h_ = 0;
+    std::vector<int> resize_x0_;
+    std::vector<int> resize_x1_;
+    std::vector<int> resize_y0_;
+    std::vector<int> resize_y1_;
+    std::vector<uint16_t> resize_wx_;
+    std::vector<uint16_t> resize_wy_;
 
     bool selected_valid_ = false;
     uint64_t selected_track_id_ = 0;
@@ -607,7 +625,8 @@ private:
                     int width,
                     int height,
                     int stride,
-                    std::vector<EyeBox>* candidates) const;
+                    std::vector<EyeBox>* candidates,
+                    float* max_class_score) const;
     void NmsAndMap(const std::vector<EyeBox>& candidates,
                    std::vector<EyeBox>* eyes) const;
     void PairEyes(const std::vector<EyeBox>& eyes, std::vector<EyePair>* pairs) const;
@@ -622,6 +641,7 @@ private:
 
     static float Sigmoid(float x);
     static float IoU(const EyeBox& a, const EyeBox& b);
+    static float IntersectionOverMinArea(const EyeBox& a, const EyeBox& b);
     static float Cosine(const std::array<float, kEmbeddingSize>& a,
                         const std::array<float, kEmbeddingSize>& b);
     static bool Normalize(std::array<float, kEmbeddingSize>* value);

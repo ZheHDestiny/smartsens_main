@@ -4,6 +4,7 @@
  */
 
 #include <iostream>
+#include <algorithm>
 #include <fstream>
 #include <cstring>
 #include <cerrno>
@@ -28,11 +29,18 @@ OsdDevice::OsdDevice()
 }
 
 OsdDevice::~OsdDevice() {
+    // Normal demo paths call Release explicitly. Keep an RAII fallback for
+    // early returns or partial initialization failures so DMA buffers and LUT
+    // memory cannot survive the owner object's lifetime.
+    if (m_device_opened || m_osd_enabled || m_pcolor_lut != nullptr) {
+        Release();
+    }
 }
 
-void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
+void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
+                           int image_dma_size) {
     SigintBlocker sig_blocker;
-    if (m_osd_enabled) {
+    if (m_device_opened || m_osd_enabled) {
         Release();
     }
     if (m_pcolor_lut != nullptr) {
@@ -57,6 +65,7 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
     }
 
     m_osd_handle = osd_open_device();
+    m_device_opened = true;
     osd_init_device(m_osd_handle, OSD_LAYER_SIZE, (char*)m_pcolor_lut);
     m_osd_enabled = true;
 
@@ -64,7 +73,18 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path) {
         // Vector text and multiple tracking boxes can exceed the historical
         // 1 KiB graphic-layer buffer.  This allocation is initialization-only.
         const bool is_image_layer = layer_index == 2 || layer_index == 5;
-        int dma_size = is_image_layer ? 0x100000 : 8192;
+        // Texture layers used by the menu can need a full-size RLE buffer,
+        // while focus tracking only writes compact status sprites. Keep the
+        // default for existing modules and allow that mode to request less
+        // scarce OCM DMA explicitly.
+        int dma_size = 8192;
+        if (layer_index == 2) {
+            dma_size = std::max(0x1000, image_dma_size);
+        } else if (layer_index == 5) {
+            // Layer 5 only carries compact icons. A second full-screen pair
+            // needlessly fragmented scarce OSD CMA between menu transitions.
+            dma_size = std::max(0x1000, std::min(image_dma_size, 0x20000));
+        }
         
         osd_alloc_buffer(m_osd_handle, m_layer_dma[layer_index].dma, dma_size);
         usleep(250000); // 等待 DMA 分配稳定
@@ -135,10 +155,11 @@ void OsdDevice::Release() {
         m_pcolor_lut = nullptr;
     }
 
-    if (m_osd_enabled) {
+    if (m_device_opened) {
         osd_close_device(m_osd_handle);
-        m_osd_enabled = false;
+        m_device_opened = false;
     }
+    m_osd_enabled = false;
     m_osd_handle = 0; // 重置为无效句柄，防止 dangling handle
     usleep(300000); // 等待驱动完成资源清理
 }

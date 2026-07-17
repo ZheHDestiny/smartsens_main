@@ -42,10 +42,22 @@ static bool same_eye_box(const EyeBox& a, const EyeBox& b) {
 }
 
 static const uint8_t* focus_glyph_rows(char ch) {
+    static const uint8_t glyph_blank[7] = {0, 0, 0, 0, 0, 0, 0};
+    static const uint8_t glyph_a[7] = {0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
+    static const uint8_t glyph_b[7] = {0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e};
+    static const uint8_t glyph_c[7] = {0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e};
+    static const uint8_t glyph_e[7] = {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f};
+    static const uint8_t glyph_f[7] = {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10};
+    static const uint8_t glyph_g[7] = {0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f};
+    static const uint8_t glyph_h[7] = {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
+    static const uint8_t glyph_l[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f};
+    static const uint8_t glyph_r[7] = {0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11};
+    static const uint8_t glyph_s[7] = {0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e};
+    static const uint8_t glyph_v[7] = {0x11, 0x11, 0x11, 0x11, 0x0a, 0x0a, 0x04};
+    static const uint8_t glyph_y[7] = {0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t glyph_z[7] = {0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f};
     static const uint8_t glyph_u[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
-    // Keep each text scanline within the A1 OSD limit of four rectangles.
-    // This simplified N uses one vertical stroke plus one diagonal stroke.
-    static const uint8_t glyph_n[7] = {0x10, 0x18, 0x14, 0x12, 0x11, 0x11, 0x11};
+    static const uint8_t glyph_n[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
     static const uint8_t glyph_k[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
     static const uint8_t glyph_o[7] = {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
     static const uint8_t glyph_w[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1b, 0x11};
@@ -56,6 +68,20 @@ static const uint8_t* focus_glyph_rows(char ch) {
     static const uint8_t glyph_p[7] = {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10};
     static const uint8_t glyph_underscore[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f};
     switch (ch) {
+        case ' ': return glyph_blank;
+        case 'A': return glyph_a;
+        case 'B': return glyph_b;
+        case 'C': return glyph_c;
+        case 'E': return glyph_e;
+        case 'F': return glyph_f;
+        case 'G': return glyph_g;
+        case 'H': return glyph_h;
+        case 'L': return glyph_l;
+        case 'R': return glyph_r;
+        case 'S': return glyph_s;
+        case 'V': return glyph_v;
+        case 'Y': return glyph_y;
+        case 'Z': return glyph_z;
         case 'U': return glyph_u;
         case 'N': return glyph_n;
         case 'K': return glyph_k;
@@ -69,6 +95,114 @@ static const uint8_t* focus_glyph_rows(char ch) {
         case '_': return glyph_underscore;
         default: return nullptr;
     }
+}
+
+static bool write_motion_status_bitmap(const char* path, const char* text) {
+    if (path == nullptr || text == nullptr) return false;
+    const int scale = 3;
+    const int glyph_width = 5 * scale;
+    const int spacing = 2 * scale;
+    const int length = static_cast<int>(std::strlen(text));
+    // Keep the longest label ("HOME/ROAD APPROACH") fully inside the bitmap.
+    const uint32_t width = 288;
+    const uint32_t height = 36;
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height, 5);
+    const int total_width = length > 0
+        ? length * glyph_width + (length - 1) * spacing : 0;
+    const int origin_x = std::max(4, (static_cast<int>(width) - total_width) / 2);
+    for (int glyph = 0; glyph < length; ++glyph) {
+        const uint8_t* rows = focus_glyph_rows(text[glyph]);
+        if (rows == nullptr) continue;
+        const int glyph_x = origin_x + glyph * (glyph_width + spacing);
+        for (int row = 0; row < 7; ++row) {
+            for (int col = 0; col < 5; ++col) {
+                if ((rows[row] & (1u << (4 - col))) == 0) continue;
+                for (int py = 0; py < scale; ++py) {
+                    const int y = 7 + row * scale + py;
+                    for (int px = 0; px < scale; ++px) {
+                        const int x = glyph_x + col * scale + px;
+                        if (x >= 0 && x < static_cast<int>(width) &&
+                            y >= 0 && y < static_cast<int>(height)) {
+                            pixels[static_cast<size_t>(y) * width + x] = 4;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const uint32_t header[4] = {0x5353424dU, width, height, 30};
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(reinterpret_cast<const char*>(header), sizeof(header));
+    file.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+    return file.good();
+}
+
+static const char* motion_status_bitmap(MotionGuardScene scene,
+                                        MotionGuardState state,
+                                        MotionGuardSystemState system_state) {
+    static bool ready[2][12] = {};
+    static char paths[2][12][64] = {};
+    static const char* const home_text[9] = {
+        "HOME LEARN", "HOME SAFE", "HOME MOTION", "HOME ZONE",
+        "HOME LOITER", "HOME MOTION", "HOME CROSS", "HOME WRONG",
+        "HOME APPROACH"
+    };
+    static const char* const road_text[9] = {
+        "ROAD LEARN", "ROAD CLEAR", "ROAD MOTION", "ROAD ZONE",
+        "ROAD LOITER", "ROAD PASS", "ROAD CROSS", "ROAD WRONG",
+        "ROAD APPROACH"
+    };
+    const int scene_index = scene == MotionGuardScene::ROADSIDE ? 1 : 0;
+    int status_index = 0;
+    const char* text = nullptr;
+    if (system_state == MotionGuardSystemState::CAMERA_UNSTABLE) {
+        status_index = 1;
+        text = scene_index == 0 ? "HOME CAMERA" : "ROAD CAMERA";
+    } else if (system_state == MotionGuardSystemState::RECALIBRATING) {
+        status_index = 2;
+        text = scene_index == 0 ? "HOME RELEARN" : "ROAD RELEARN";
+    } else if (system_state == MotionGuardSystemState::CALIBRATING) {
+        status_index = 0;
+        text = scene_index == 0 ? "HOME LEARN" : "ROAD LEARN";
+    } else {
+        status_index = 3 + std::max(0, std::min(8, static_cast<int>(state)));
+        text = scene_index == 0 ? home_text[status_index - 3]
+                                : road_text[status_index - 3];
+    }
+    if (!ready[scene_index][status_index]) {
+        std::snprintf(paths[scene_index][status_index],
+                      sizeof(paths[scene_index][status_index]),
+                      "/tmp/ssne_motion_%d_%d.ssbmp", scene_index, status_index);
+        ready[scene_index][status_index] =
+            write_motion_status_bitmap(paths[scene_index][status_index], text);
+    }
+    return ready[scene_index][status_index]
+        ? paths[scene_index][status_index] : nullptr;
+}
+
+static const char* optical_status_bitmap(const ObstacleInfo& obstacle_info) {
+    static bool ready[3][3] = {};
+    static char paths[3][3][64] = {};
+    const int region = std::max(0, std::min(2, obstacle_info.most_dangerous_region));
+    const int priority_index = obstacle_info.priority == ObstacleInfo::EMERGENCY ? 2 :
+        (obstacle_info.priority == ObstacleInfo::CAUTION ? 1 : 0);
+    const char* text = "SAFE";
+    if (priority_index == 1) {
+        text = region == ObstacleInfo::LEFT ? "CAUTION L" :
+               (region == ObstacleInfo::CENTER ? "CAUTION C" : "CAUTION R");
+    } else if (priority_index == 2) {
+        text = region == ObstacleInfo::LEFT ? "BRAKE L" :
+               (region == ObstacleInfo::CENTER ? "BRAKE C" : "BRAKE R");
+    }
+    if (!ready[priority_index][region]) {
+        std::snprintf(paths[priority_index][region],
+                      sizeof(paths[priority_index][region]),
+                      "/tmp/ssne_optical_%d_%d.ssbmp", priority_index, region);
+        ready[priority_index][region] =
+            write_motion_status_bitmap(paths[priority_index][region], text);
+    }
+    return ready[priority_index][region] ? paths[priority_index][region] : nullptr;
 }
 
 static bool write_focus_status_bitmap(const char* path, const char* text) {
@@ -167,7 +301,9 @@ static const char* focus_face_bitmap() {
     return ready ? kPath : nullptr;
 }
 
-void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape, const std::string& bitmap_lut_path) {
+void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
+                            const std::string& bitmap_lut_path,
+                            int image_dma_size) {
     m_width = in_img_shape[0];
     m_height = in_img_shape[1];
 
@@ -177,8 +313,10 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape, const std::string&
         lut_path = m_bitmap_lut_path_full.c_str();
     }
     
-    osd_device.Initialize(m_width, m_height, lut_path);
+    osd_device.Initialize(m_width, m_height, lut_path, image_dma_size);
     enabled_ = osd_device.IsEnabled();
+    last_optical_priority_ = -1;
+    last_optical_region_ = -1;
     
     if (!enabled_) {
         std::cerr << "[VISUALIZER] Warning: OSD device not enabled or initialization failed." << std::endl;
@@ -188,6 +326,8 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape, const std::string&
 void VISUALIZER::Release() {
     if (enabled_) osd_device.Release();
     enabled_ = false;
+    last_optical_priority_ = -1;
+    last_optical_region_ = -1;
 }
 
 void VISUALIZER::Clear() {
@@ -459,6 +599,142 @@ void VISUALIZER::DrawFocusEnrollmentFlash(const std::array<float, 4>& fov,
     osd_device.Draw(quads, LAYER_MASK);
 }
 
+void VISUALIZER::DrawMotionGuard(const MotionGuardResult& result,
+                                 int crop_x,
+                                 int crop_y,
+                                 int crop_width,
+                                 int crop_height,
+                                 int process_width,
+                                 int process_height) {
+    if (!enabled_ || process_width <= 0 || process_height <= 0) return;
+    const float scale_x = static_cast<float>(crop_width) / process_width;
+    const float scale_y = static_cast<float>(crop_height) / process_height;
+    const bool warning = result.state == MotionGuardState::LOITERING ||
+                         result.state == MotionGuardState::LINE_CROSSING ||
+                         result.state == MotionGuardState::WRONG_WAY ||
+                         result.state == MotionGuardState::APPROACHING;
+
+    const int scene_value = static_cast<int>(result.scene);
+    const int state_value = static_cast<int>(result.state);
+    const int system_state_value = static_cast<int>(result.system_state);
+    if (scene_value != last_motion_scene_ || state_value != last_motion_state_ ||
+        system_state_value != last_motion_system_state_) {
+        const char* bitmap = motion_status_bitmap(result.scene, result.state,
+                                                  result.system_state);
+        osd_device.ClearLayer(LAYER_BITMAP);
+        if (bitmap != nullptr) {
+            osd_device.DrawTexture(bitmap, nullptr, LAYER_BITMAP,
+                                   std::max(0, crop_x + crop_width - 292),
+                                   crop_y + 4, fdevice::TYPE_ALPHA100);
+        }
+        last_motion_scene_ = scene_value;
+        last_motion_state_ = state_value;
+        last_motion_system_state_ = system_state_value;
+    }
+
+    std::vector<OsdQR> guide;
+    OsdQR zone;
+    zone.box = {
+        crop_x + result.zone_x1 * crop_width,
+        crop_y + result.zone_y1 * crop_height,
+        crop_x + result.zone_x2 * crop_width,
+        crop_y + result.zone_y2 * crop_height
+    };
+    zone.border = warning ? 5 : 2;
+    zone.layer_id = LAYER_OBSTACLES;
+    zone.type = fdevice::TYPE_HOLLOW;
+    zone.alpha = warning ? fdevice::TYPE_ALPHA100 : fdevice::TYPE_ALPHA50;
+    zone.color = warning ? 4 : 23;
+    guide.push_back(zone);
+    if (result.line_y >= 0.0f) {
+        OsdQR line;
+        const float y = crop_y + result.line_y * crop_height;
+        line.box = {static_cast<float>(crop_x), y - 1.0f,
+                    static_cast<float>(crop_x + crop_width - 1), y + 1.0f};
+        line.border = 0;
+        line.layer_id = LAYER_OBSTACLES;
+        line.type = fdevice::TYPE_SOLID;
+        line.alpha = fdevice::TYPE_ALPHA75;
+        line.color = 4;
+        guide.push_back(line);
+    }
+    std::vector<OsdQR> empty;
+    osd_device.Draw(empty, LAYER_OBSTACLES);
+    osd_device.Draw(guide, LAYER_OBSTACLES);
+
+    std::vector<OsdQR> boxes;
+    if (result.selected_index >= 0 &&
+        result.selected_index < static_cast<int>(result.tracks.size())) {
+        const MotionGuardTrack& track = result.tracks[result.selected_index];
+        OsdQR box;
+        box.box = {
+            clampf(crop_x + track.x * scale_x,
+                   static_cast<float>(crop_x),
+                   static_cast<float>(crop_x + crop_width - 1)),
+            clampf(crop_y + track.y * scale_y,
+                   static_cast<float>(crop_y),
+                   static_cast<float>(crop_y + crop_height - 1)),
+            clampf(crop_x + (track.x + track.w) * scale_x,
+                   static_cast<float>(crop_x),
+                   static_cast<float>(crop_x + crop_width - 1)),
+            clampf(crop_y + (track.y + track.h) * scale_y,
+                   static_cast<float>(crop_y),
+                   static_cast<float>(crop_y + crop_height - 1))
+        };
+        box.layer_id = DETECTION_LAYER_ID;
+        box.type = fdevice::TYPE_HOLLOW;
+        box.border = warning ? 7 : 4;
+        box.alpha = fdevice::TYPE_ALPHA100;
+        box.color = 4;
+        boxes.push_back(box);
+    }
+    osd_device.Draw(empty, DETECTION_LAYER_ID);
+    osd_device.Draw(boxes, DETECTION_LAYER_ID);
+
+    // A compact, axis-aligned direction arrow is attached to the current
+    // semantic target. Other internal tracks are deliberately not drawn.
+    std::vector<OsdQR> direction;
+    if (result.selected_index >= 0 &&
+        result.selected_index < static_cast<int>(result.tracks.size())) {
+        const MotionGuardTrack& track = result.tracks[result.selected_index];
+        const float speed = std::sqrt(track.vx * track.vx + track.vy * track.vy);
+        if (speed >= 0.5f) {
+            const float cx = crop_x + track.cx * scale_x;
+            const float cy = crop_y + track.cy * scale_y;
+            const bool horizontal = std::fabs(track.vx) >= std::fabs(track.vy);
+            const float sign = horizontal
+                ? (track.vx >= 0.0f ? 1.0f : -1.0f)
+                : (track.vy >= 0.0f ? 1.0f : -1.0f);
+            const auto add = [&direction](float x1, float y1, float x2, float y2) {
+                OsdQR q;
+                q.box = {std::min(x1, x2), std::min(y1, y2),
+                         std::max(x1, x2), std::max(y1, y2)};
+                q.border = 0;
+                q.layer_id = LAYER_SAFEDIR;
+                q.type = fdevice::TYPE_SOLID;
+                q.alpha = fdevice::TYPE_ALPHA100;
+                q.color = 4;
+                direction.push_back(q);
+            };
+            if (horizontal) {
+                const float tip = clampf(cx + sign * 42.0f,
+                                         crop_x + 12.0f, crop_x + crop_width - 12.0f);
+                add(std::min(cx, tip), cy - 2, std::max(cx, tip), cy + 2);
+                add(tip - sign * 9, cy - 9, tip, cy - 3);
+                add(tip - sign * 9, cy + 3, tip, cy + 9);
+            } else {
+                const float tip = clampf(cy + sign * 42.0f,
+                                         crop_y + 12.0f, crop_y + crop_height - 12.0f);
+                add(cx - 2, std::min(cy, tip), cx + 2, std::max(cy, tip));
+                add(cx - 9, tip - sign * 9, cx - 3, tip);
+                add(cx + 3, tip - sign * 9, cx + 9, tip);
+            }
+        }
+    }
+    osd_device.Draw(empty, LAYER_SAFEDIR);
+    osd_device.Draw(direction, LAYER_SAFEDIR);
+}
+
 void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
                            const std::vector<float>& scores,
                            const std::vector<int>& class_ids,
@@ -574,14 +850,23 @@ void VISUALIZER::DrawMask(int crop_offset_y, int crop_height) {
 void VISUALIZER::DrawAll(const std::vector<FeaturePoint>& features, const ObstacleInfo& obstacle_info, int crop_offset_y, uint32_t frame_count) {
     (void)features;
     if (!enabled_) return;
-    DrawMask(crop_offset_y, 540); 
+    DrawMask(crop_offset_y, 540);
     DrawObstacleRegions(obstacle_info, crop_offset_y, frame_count);
-    if (obstacle_info.priority == 4) {
-        std::vector<OsdQR> empty;
-        osd_device.Draw(empty, LAYER_SAFEDIR);
-    } else {
-       std::vector<OsdQR> empty;
-       osd_device.Draw(empty, LAYER_SAFEDIR); //
+    DrawSafeDirection(obstacle_info, crop_offset_y);
+
+    // The label is a generated monochrome bitmap so that it remains readable
+    // on grayscale OSD hardware; it is regenerated only once per state.
+    if (last_optical_priority_ != obstacle_info.priority ||
+        last_optical_region_ != obstacle_info.most_dangerous_region) {
+        const char* bitmap = optical_status_bitmap(obstacle_info);
+        std::vector<OsdQR> clear;
+        osd_device.Draw(clear, LAYER_BITMAP);
+        if (bitmap != nullptr) {
+            osd_device.DrawTexture(bitmap, nullptr, LAYER_BITMAP,
+                                   m_width - 292, crop_offset_y + 4);
+        }
+        last_optical_priority_ = obstacle_info.priority;
+        last_optical_region_ = obstacle_info.most_dangerous_region;
     }
 }
 
@@ -592,22 +877,23 @@ void VISUALIZER::DrawObstacleRegions(const ObstacleInfo& obstacle_info, int crop
     float crop_height = 540.0f; 
 
     for (int i = 0; i < ObstacleInfo::REGION_COUNT; i++) {
-        if (obstacle_info.has_obstacle[i]) {
-            bool flash_on = (frame_count / 5) % 2 == 0;
-            
-            if (flash_on) {
-                float x_start = region_w * i;
-                float x_end = region_w * (i + 1);
-                OsdQR q;
-                q.box = {x_start + 2, (float)crop_offset_y + 2,x_end - 2,(float)crop_offset_y + crop_height - 2};
-                
-                q.border = 12; 
-                q.color = 0; 
-                q.alpha = fdevice::TYPE_ALPHA100; 
-                q.type = fdevice::TYPE_HOLLOW;
-                regions.emplace_back(q);
-            }
-        }
+        const float x_start = region_w * i;
+        const float x_end = region_w * (i + 1);
+        const bool emergency = obstacle_info.priority == ObstacleInfo::EMERGENCY &&
+                               obstacle_info.most_dangerous_region == i;
+        const bool caution = obstacle_info.has_obstacle[i];
+        const bool flash_on = !emergency || ((frame_count / 5) % 2 == 0);
+
+        OsdQR q;
+        q.box = {x_start + 2, static_cast<float>(crop_offset_y) + 2,
+                 x_end - 2, static_cast<float>(crop_offset_y) + crop_height - 2};
+        q.border = emergency ? 10 : (caution ? 6 : 2);
+        q.color = (emergency || caution) ? 4 : 29;
+        q.alpha = (emergency || caution) && flash_on
+            ? fdevice::TYPE_ALPHA100 : fdevice::TYPE_ALPHA25;
+        q.type = fdevice::TYPE_HOLLOW;
+        q.layer_id = LAYER_OBSTACLES;
+        regions.emplace_back(q);
     }
     osd_device.Draw(regions, LAYER_OBSTACLES);
 }
@@ -643,32 +929,19 @@ void VISUALIZER::DrawFeaturePoints(const std::vector<FeaturePoint>& features, in
 void VISUALIZER::DrawSafeDirection(const ObstacleInfo& obstacle_info, int crop_offset_y) {
     if (!enabled_) return;
     std::vector<OsdQR> indicators;
-    if (obstacle_info.priority != 0) {
-        osd_device.Draw(indicators, LAYER_SAFEDIR); 
-        return;
-    }
-
-    int safest = 0;
-    float min_danger = obstacle_info.danger_level[0];
-    for (int i = 1; i < ObstacleInfo::REGION_COUNT; i++) {
-        if (obstacle_info.danger_level[i] < min_danger) {
-            min_danger = obstacle_info.danger_level[i];
-            safest = i;
-        }
-    }
-
     float region_w = (float)m_width / 3.0f;
-    float indicator_y = (float)crop_offset_y + 540.0f - 60.0f;
-    float indicator_h = 30.0f;
-    float cx = region_w * safest + region_w / 2.0f;  
-    float arrow_w = region_w * 0.4f;  
+    float indicator_y = (float)crop_offset_y + 540.0f - 44.0f;
+    float indicator_h = 24.0f;
+    float cx = region_w * obstacle_info.safest_region + region_w / 2.0f;
+    float arrow_w = region_w * 0.34f;
 
     OsdQR q;
     q.box = {cx - arrow_w, indicator_y, cx + arrow_w, indicator_y + indicator_h};
     q.border = 3;
-    q.color = 1; 
+    q.color = 4;
     q.alpha = fdevice::TYPE_ALPHA100;
     q.type = fdevice::TYPE_HOLLOW;
+    q.layer_id = LAYER_SAFEDIR;
     indicators.emplace_back(q);
 
     osd_device.Draw(indicators, LAYER_SAFEDIR);

@@ -319,18 +319,31 @@ struct FeaturePoint {
 
 struct ObstacleInfo {
     enum Region { LEFT = 0, CENTER = 1, RIGHT = 2, REGION_COUNT = 3 };
+    enum Priority { EMERGENCY = 0, CAUTION = 1, CLEAR = 4 };
     float danger_level[REGION_COUNT];
+    float ttc_seconds[REGION_COUNT];
+    int support_count[REGION_COUNT];
     bool has_obstacle[REGION_COUNT];
     int most_dangerous_region;
+    int safest_region;
     int priority;
+    float global_dx;
+    float global_dy;
+    float tracking_quality;
 
     ObstacleInfo() {
         for (int i = 0; i < REGION_COUNT; i++) {
             danger_level[i] = 0.0f;
+            ttc_seconds[i] = -1.0f;
+            support_count[i] = 0;
             has_obstacle[i] = false;
         }
         most_dangerous_region = CENTER;
-        priority = 4;
+        safest_region = CENTER;
+        priority = CLEAR;
+        global_dx = 0.0f;
+        global_dy = 0.0f;
+        tracking_quality = 0.0f;
     }
 };
 
@@ -339,10 +352,12 @@ public:
     void Initialize(int width, int height);
     void ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_frame, std::vector<FeaturePoint>& features);
     void DetectFeatures(const uint8_t* frame, std::vector<FeaturePoint>& features);
+    void ResetHistory();
     void Release();
 
     int max_features;      
     int fast_threshold;    
+    int feature_scan_step;
     int nms_radius;        
     int grid_size;         
     int grid_max_per_cell; 
@@ -358,16 +373,21 @@ private:
     std::vector<std::vector<uint8_t>> pyramid_curr_;
     std::vector<int> pyr_widths_;
     std::vector<int> pyr_heights_;
+    bool pyramid_cache_valid_ = false;
 
     void BuildPyramid(const uint8_t* frame, std::vector<std::vector<uint8_t>>& pyramid);
     static float Interp(const uint8_t* img, int w, int h, float x, float y);
-    bool TrackPointSingleLevel(const uint8_t* prev, const uint8_t* curr, int w, int h, float px, float py, float& cx, float& cy);
+    bool TrackPointSingleLevel(const uint8_t* prev, const uint8_t* curr,
+                               int w, int h, float px, float py,
+                               float& cx, float& cy,
+                               float* photometric_error = nullptr);
 };
 
 class OBSTACLE_DETECTOR {
 public:
     void Initialize(int width, int height);
     void DetectObstacles(const std::vector<FeaturePoint>& features, ObstacleInfo& obstacle_info);
+    void SetFrameInterval(float seconds);
     void Release();
 
     float ttc_threshold;   
@@ -375,8 +395,10 @@ public:
 
 private:
     int width_, height_;
-    float ComputeTTC(float x, float y, float dx, float dy);
-    float ComputeDivergence(const std::vector<FeaturePoint>& features);
+    float frame_interval_seconds_ = 1.0f / 75.0f;
+    float smoothed_danger_[ObstacleInfo::REGION_COUNT] = {0.0f, 0.0f, 0.0f};
+    bool latched_obstacle_[ObstacleInfo::REGION_COUNT] = {false, false, false};
+    float ComputeTTC(float x, float y, float dx, float dy) const;
 };
 
 enum class FocusTrackingMode : int {

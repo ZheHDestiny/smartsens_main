@@ -48,8 +48,19 @@ file(GLOB BUSINESS_SRC
 # notices the newly added source file; remove the duplicate produced by GLOB.
 list(APPEND BUSINESS_SRC
     "${CMAKE_SOURCE_DIR}/modules/focus_tracking/src/eyedet_faceid_engine.cpp"
+    "${CMAKE_SOURCE_DIR}/modules/focus_tracking/src/motion_guard.cpp"
 )
 list(REMOVE_DUPLICATES BUSINESS_SRC)
+
+# The CPU optical-flow path is latency critical on A1's Cortex-A7. Keep these
+# flags source-local so the remaining NPU demos retain their existing ABI and
+# floating-point behaviour.
+set_source_files_properties(
+    "${CMAKE_SOURCE_DIR}/modules/optical_flow_debug/optical_flow_main.cpp"
+    "${CMAKE_SOURCE_DIR}/modules/optical_flow_debug/src/optical_flow.cpp"
+    PROPERTIES COMPILE_FLAGS
+    "-O3 -mcpu=cortex-a7 -mfpu=neon-vfpv4 -ffast-math -fno-math-errno"
+)
 
 # ==========================================
 # 生成可执行文件并链接库

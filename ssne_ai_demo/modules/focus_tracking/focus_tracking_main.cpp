@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "common.hpp"
+#include "motion_guard.hpp"
 #include "utils.hpp"
 
 using namespace std;
@@ -136,7 +137,7 @@ static int find_pair_by_track_id(const vector<EyePair>& pairs, uint64_t track_id
 static const char* focus_mode_name(FocusTrackingMode mode) {
     switch (mode) {
         case FocusTrackingMode::NO_NPU_TRACKER:
-            return "传统视觉追焦";
+            return "MotionGuard CPU 多目标风险追焦";
         case FocusTrackingMode::NPU_MOBILENET:
             return "EyeDet-S + FaceID-S 智能追焦";
         default:
@@ -144,11 +145,113 @@ static const char* focus_mode_name(FocusTrackingMode mode) {
     }
 }
 
+static const char* motion_scene_name_cn(MotionGuardScene scene) {
+    return scene == MotionGuardScene::ROADSIDE ? "路侧监控" : "居家守护";
+}
+
+static const char* motion_state_name_cn(MotionGuardState state) {
+    switch (state) {
+        case MotionGuardState::CALIBRATING:   return "背景学习";
+        case MotionGuardState::CLEAR:         return "区域安全";
+        case MotionGuardState::MOTION:        return "发现移动";
+        case MotionGuardState::ZONE_OCCUPIED: return "守护区有人";
+        case MotionGuardState::LOITERING:     return "目标长时间滞留";
+        case MotionGuardState::PASSING:       return "目标正常经过";
+        case MotionGuardState::LINE_CROSSING: return "目标越过警戒线";
+        case MotionGuardState::WRONG_WAY:     return "目标逆向移动";
+        case MotionGuardState::APPROACHING:   return "目标快速接近";
+    }
+    return "未知状态";
+}
+
+static const char* motion_system_state_name_cn(MotionGuardSystemState state) {
+    switch (state) {
+        case MotionGuardSystemState::CALIBRATING:     return "背景学习";
+        case MotionGuardSystemState::ARMED:           return "已布防";
+        case MotionGuardSystemState::CAMERA_UNSTABLE: return "检测到机位变化";
+        case MotionGuardSystemState::RECALIBRATING:   return "正在重建背景";
+    }
+    return "未知系统状态";
+}
+
+static const char* motion_display_state_name_cn(const MotionGuardResult& result) {
+    return result.system_state == MotionGuardSystemState::ARMED
+        ? motion_state_name_cn(result.state)
+        : motion_system_state_name_cn(result.system_state);
+}
+
+static bool motion_state_is_warning(MotionGuardState state) {
+    return state == MotionGuardState::LOITERING ||
+           state == MotionGuardState::LINE_CROSSING ||
+           state == MotionGuardState::WRONG_WAY ||
+           state == MotionGuardState::APPROACHING;
+}
+
+static const char* motion_direction_name_cn(const MotionGuardTrack* track) {
+    if (track == nullptr) return "无";
+    const float ax = std::fabs(track->vx);
+    const float ay = std::fabs(track->vy);
+    if (std::max(ax, ay) < 0.5f) return "基本静止";
+    if (ax >= ay) return track->vx >= 0.0f ? "向右" : "向左";
+    return track->vy >= 0.0f ? "向下" : "向上";
+}
+
+static void print_motion_state_transition(MotionGuardScene scene,
+                                          MotionGuardState previous,
+                                          const MotionGuardResult& result) {
+    const MotionGuardTrack* selected =
+        result.selected_index >= 0 &&
+        result.selected_index < static_cast<int>(result.tracks.size())
+            ? &result.tracks[result.selected_index] : nullptr;
+    const char* scene_name = motion_scene_name_cn(scene);
+    if (result.state == MotionGuardState::CALIBRATING) {
+        printf("[%s][状态] 正在学习静态背景，请保持机位稳定。\n", scene_name);
+        return;
+    }
+    if (result.state == MotionGuardState::CLEAR) {
+        if (previous != MotionGuardState::CALIBRATING &&
+            previous != MotionGuardState::CLEAR) {
+            printf("[%s][恢复] 关注区域已恢复安全。\n", scene_name);
+        } else {
+            printf("[%s][状态] 背景学习完成，当前区域安全。\n", scene_name);
+        }
+        return;
+    }
+    printf("[%s][%s] %s",
+           scene_name,
+           motion_state_is_warning(result.state) ? "告警" : "状态",
+           motion_state_name_cn(result.state));
+    if (selected != nullptr) {
+        printf("，关注目标#%llu，方向=%s，风险=%.0f%%",
+               static_cast<unsigned long long>(selected->id),
+               motion_direction_name_cn(selected), selected->risk);
+    }
+    printf("。\n");
+}
+
+static void print_motion_system_transition(MotionGuardScene scene,
+                                           MotionGuardSystemState previous,
+                                           MotionGuardSystemState current) {
+    const char* scene_name = motion_scene_name_cn(scene);
+    if (current == MotionGuardSystemState::CAMERA_UNSTABLE) {
+        printf("[%s][相机] 检测到机位变化，暂停目标监测并清除旧框。\n", scene_name);
+    } else if (current == MotionGuardSystemState::RECALIBRATING) {
+        printf("[%s][相机] 画面已稳定，正在建立新的背景基线。\n", scene_name);
+    } else if (current == MotionGuardSystemState::ARMED) {
+        if (previous == MotionGuardSystemState::RECALIBRATING ||
+            previous == MotionGuardSystemState::CALIBRATING) {
+            printf("[%s][相机] 背景建立完成，监测已恢复：区域安全。\n", scene_name);
+        } else {
+            printf("[%s][相机] 监测已布防。\n", scene_name);
+        }
+    }
+}
+
 static void print_focus_mode_menu() {
     cout << "\n======================================================\n";
     cout << "          追焦功能子菜单 / Focus Tracking            \n";
     cout << "======================================================\n";
-    cout << "  1. 传统视觉追焦 (No NPU - 高帧率模板追踪)\n";
+    cout << "  1. MotionGuard CPU场景守护 (居家守护/路侧监控)\n";
     cout << "  2. EyeDet-S + FaceID-S 智能追焦 (双眼检测 + 临时ID)\n";
     cout << "  0. 返回主菜单\n";
     cout << "======================================================\n";
@@ -190,13 +293,49 @@ static bool choose_focus_mode(FocusTrackingMode* mode) {
     return false;
 }
 
-static void focus_keyboard_listener() {
+static bool choose_motion_guard_scene(MotionGuardScene* scene) {
+    if (scene == nullptr) return false;
+    while (!g_signal_received.load()) {
+        int choice = -1;
+        clear_stdin_residual();
+        cout << "\n======================================================\n";
+        cout << "       MotionGuard CPU 固定机位场景参数              \n";
+        cout << "======================================================\n";
+        cout << "  1. 居家守护：守护区进入、滞留、快速接近\n";
+        cout << "  2. 路侧监控：正常经过、越线、逆行、快速接近\n";
+        cout << "  0. 返回追焦子菜单\n";
+        cout << "======================================================\n";
+        cout << "请输入场景编号 (0-2) 并按回车: ";
+        cin >> choice;
+        if (cin.fail()) {
+            cin.clear();
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "\n[错误] 输入无效，请输入数字编号！\n";
+            continue;
+        }
+        if (choice == 0) return false;
+        if (choice == 1) {
+            *scene = MotionGuardScene::HOME;
+            return true;
+        }
+        if (choice == 2) {
+            *scene = MotionGuardScene::ROADSIDE;
+            return true;
+        }
+        cout << "\n[提示] 无效场景编号。\n";
+    }
+    return false;
+}
+
+static void focus_keyboard_listener(FocusTrackingMode mode) {
     string input;
     printf("[追焦键盘] ┌─────────────────────────────────┐\n");
     printf("[追焦键盘] │ P/p: 暂停/继续                  │\n");
     printf("[追焦键盘] │ R/r: 重置锁定目标                │\n");
-    printf("[追焦键盘] │ E/e: 录入当前目标为 id_tmp       │\n");
-    printf("[追焦键盘] │ C/c: 清除临时身份                 │\n");
+    if (mode == FocusTrackingMode::NPU_MOBILENET) {
+        printf("[追焦键盘] │ E/e: 录入当前目标为 id_tmp       │\n");
+        printf("[追焦键盘] │ C/c: 清除临时身份                 │\n");
+    }
     printf("[追焦键盘] │ Q/q: 退出当前子功能并返回子菜单  │\n");
     printf("[追焦键盘] └─────────────────────────────────┘\n\n");
 
@@ -218,10 +357,12 @@ static void focus_keyboard_listener() {
                 g_focus_pause = false;
                 g_focus_reset = true;
             }
-            if (input == "e" || input == "E") {
+            if (mode == FocusTrackingMode::NPU_MOBILENET &&
+                (input == "e" || input == "E")) {
                 g_focus_enroll = true;
             }
-            if (input == "c" || input == "C") {
+            if (mode == FocusTrackingMode::NPU_MOBILENET &&
+                (input == "c" || input == "C")) {
                 g_focus_clear_id = true;
             }
         }
@@ -289,6 +430,12 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
 
     clear_stdin_residual();
 
+    MotionGuardScene motion_scene = MotionGuardScene::HOME;
+    if (selected_mode == FocusTrackingMode::NO_NPU_TRACKER &&
+        !choose_motion_guard_scene(&motion_scene)) {
+        return 0;
+    }
+
     printf("\n");
     printf("═══════════════════════════════════════════════════════════\n");
     printf("     SmartSens 单目追焦系统\n");
@@ -311,7 +458,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     IMAGEPROCESSOR image_processor;
 
     bool ssne_ok = false;
-    {
+    if (selected_mode == FocusTrackingMode::NPU_MOBILENET) {
         SigintBlocker blocker;
         if (ssne_initial() != 0) {
             fprintf(stderr, "[WARN] ssne_initial() failed!\n");
@@ -348,6 +495,24 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     FocusTracker tracker;
     tracker.Initialize(tracker_config);
 
+    MotionGuard motion_guard;
+    MotionGuardResult motion_result;
+    uint64_t motion_focus_track_id = 0;
+    int motion_focus_missing_frames = 0;
+    MotionGuardState last_motion_state = MotionGuardState::CALIBRATING;
+    MotionGuardSystemState last_motion_system_state =
+        MotionGuardSystemState::CALIBRATING;
+    if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER) {
+        motion_guard.Initialize(proc_w, proc_h, motion_scene, 90);
+        motion_result.tracks.reserve(8);
+        printf("[%s] CPU-only，检测网格=180x135；UI白框仅表示当前关注目标。\n",
+               motion_scene_name_cn(motion_scene));
+        printf("[%s] 顶部状态条给出场景结论，区域框表示规则生效范围，箭头表示目标方向。\n",
+               motion_scene_name_cn(motion_scene));
+        printf("[%s][状态] 正在学习静态背景，请保持机位稳定。\n",
+               motion_scene_name_cn(motion_scene));
+    }
+
     EyeDetFaceIdEngine smart_engine;
     if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
         if (!ssne_ok || !smart_engine.Initialize(
@@ -374,7 +539,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     // Other main demos initialize the visualizer directly.  Do the same here:
     // device-name probing is not reliable across board images, while
     // VISUALIZER itself reports a precise initialization failure if OSD is off.
-    visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+    // This mode only uses small RLE status sprites; do not reserve the menu's
+    // 1 MiB-per-image-layer OCM budget on the constrained A1 board.
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000);
     const std::array<float, 4> focus_fov = {
         static_cast<float>(crop_x1), static_cast<float>(crop_y1),
         static_cast<float>(crop_x2 - 1), static_cast<float>(crop_y2 - 1)};
@@ -390,9 +557,13 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     printf("[配置] sensor=%dx%d crop=(%d,%d)-(%d,%d) capture=%dx%d proc=%dx%d\n",
            sensor_w, sensor_h, crop_x1, crop_y1, crop_x2, crop_y2, capture_w, capture_h, proc_w, proc_h);
     printf("[模式] %s\n", focus_mode_name(tracker_config.mode));
-    printf("[处理] P/p暂停 | R/r重置 | E/e录入id_tmp | C/c清ID | Q/q返回\n\n");
+    if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+        printf("[处理] P/p暂停 | R/r重置 | E/e录入id_tmp | C/c清ID | Q/q返回\n\n");
+    } else {
+        printf("[处理] P/p暂停 | R/r重置背景与轨迹 | Q/q返回\n\n");
+    }
 
-    thread listener_thread(focus_keyboard_listener);
+    thread listener_thread(focus_keyboard_listener, selected_mode);
 
     ssne_tensor_t curr_frame;
     memset(&curr_frame, 0, sizeof(ssne_tensor_t));
@@ -454,6 +625,13 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 last_recover_successes = health.recover_successes;
                 tracker.Reset();
                 target.Clear();
+                if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER) {
+                    motion_guard.Reset();
+                    motion_focus_track_id = 0;
+                    motion_focus_missing_frames = 0;
+                    last_motion_state = MotionGuardState::CALIBRATING;
+                    last_motion_system_state = MotionGuardSystemState::CALIBRATING;
+                }
                 smart_engine.ResetSession();
                 identity_result.Clear();
                 identity_track_id = 0;
@@ -500,6 +678,13 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             if (focus_take_reset_request()) {
                 tracker.Reset();
                 target.Clear();
+                if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER) {
+                    motion_guard.Reset();
+                    motion_focus_track_id = 0;
+                    motion_focus_missing_frames = 0;
+                    last_motion_state = MotionGuardState::CALIBRATING;
+                    last_motion_system_state = MotionGuardSystemState::CALIBRATING;
+                }
                 smart_engine.ResetSession();
                 identity_result.Clear();
                 identity_track_id = 0;
@@ -698,7 +883,69 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             } else {
                 focus_take_enroll_request();
                 const auto tracker_begin = chrono::steady_clock::now();
-                locked = tracker.Update(ensure_proc_frame(), &target);
+                uint8_t* cpu_frame = ensure_proc_frame();
+                motion_guard.Process(cpu_frame, frame_count, &motion_result);
+                if (motion_result.system_state != last_motion_system_state) {
+                    print_motion_system_transition(motion_scene,
+                                                   last_motion_system_state,
+                                                   motion_result.system_state);
+                    last_motion_system_state = motion_result.system_state;
+                    last_motion_state = motion_result.state;
+                } else if (motion_result.system_state == MotionGuardSystemState::ARMED &&
+                           motion_result.state != last_motion_state) {
+                    print_motion_state_transition(
+                        motion_scene, last_motion_state, motion_result);
+                    last_motion_state = motion_result.state;
+                }
+                if (motion_result.background_ready &&
+                    motion_result.selected_index >= 0 &&
+                    motion_result.selected_index <
+                        static_cast<int>(motion_result.tracks.size())) {
+                    const MotionGuardTrack& motion_target =
+                        motion_result.tracks[motion_result.selected_index];
+                    FocusTargetState motion_seed;
+                    motion_seed.w = tracker_config.target_w;
+                    motion_seed.h = tracker_config.target_h;
+                    motion_seed.cx = motion_target.cx;
+                    motion_seed.cy = motion_target.cy;
+                    motion_seed.x = static_cast<int>(std::round(
+                        motion_seed.cx - 0.5f * motion_seed.w));
+                    motion_seed.y = static_cast<int>(std::round(
+                        motion_seed.cy - 0.5f * motion_seed.h));
+                    motion_seed.x = std::max(
+                        0, std::min(motion_seed.x, proc_w - motion_seed.w));
+                    motion_seed.y = std::max(
+                        0, std::min(motion_seed.y, proc_h - motion_seed.h));
+                    motion_seed.cx = motion_seed.x + 0.5f * motion_seed.w;
+                    motion_seed.cy = motion_seed.y + 0.5f * motion_seed.h;
+                    motion_seed.confidence = motion_target.risk / 100.0f;
+                    motion_seed.locked = true;
+                    motion_seed.age = target.age + 1;
+                    if (!tracker.HasTarget() ||
+                        motion_focus_track_id != motion_target.id ||
+                        frame_count % 10 == 0) {
+                        tracker.SetTarget(cpu_frame, motion_seed);
+                        target = motion_seed;
+                    } else {
+                        tracker.Update(cpu_frame, &target);
+                    }
+                    motion_focus_track_id = motion_target.id;
+                    motion_focus_missing_frames = 0;
+                    locked = true;
+
+                } else {
+                    ++motion_focus_missing_frames;
+                    if (tracker.HasTarget() && motion_focus_track_id != 0 &&
+                        motion_focus_missing_frames <= 12) {
+                        locked = tracker.Update(cpu_frame, &target);
+                    }
+                    if (!locked) {
+                        tracker.Reset();
+                        motion_focus_track_id = 0;
+                        motion_focus_missing_frames = 0;
+                        target.Clear();
+                    }
+                }
                 const auto tracker_end = chrono::steady_clock::now();
                 tracker_ms.Add(chrono::duration<float, milli>(
                     tracker_end - tracker_begin).count());
@@ -741,20 +988,14 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                     visualizer.DrawFocusConfidence(eye_confidence, identity_confidence);
                     last_osd_locked = !eye_result.eyes.empty();
                 }
-            } else if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER &&
-                       locked) {
-                int sx1 = crop_x1 + target.x * (crop_x2 - crop_x1) / proc_w;
-                int sy1 = crop_y1 + target.y * (crop_y2 - crop_y1) / proc_h;
-                int sx2 = crop_x1 + (target.x + target.w) * (crop_x2 - crop_x1) / proc_w;
-                int sy2 = crop_y1 + (target.y + target.h) * (crop_y2 - crop_y1) / proc_h;
-                vector<array<float, 4>> focus_boxes;
-                vector<float> focus_scores;
-                vector<int> focus_class_ids;
-                focus_boxes.push_back({(float)sx1, (float)sy1, (float)sx2, (float)sy2});
-                focus_scores.push_back(target.confidence);
-                focus_class_ids.push_back(0);
-                visualizer.Draw(focus_boxes, focus_scores, focus_class_ids);
-                last_osd_locked = true;
+            } else if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER) {
+                if (frame_count == 1 || frame_count % osd_refresh_interval == 0) {
+                    visualizer.DrawMotionGuard(motion_result,
+                                               crop_x1, crop_y1,
+                                               capture_w, capture_h,
+                                               proc_w, proc_h);
+                }
+                last_osd_locked = !motion_result.tracks.empty();
             } else if (!locked && last_osd_locked) {
                 vector<array<float, 4>> empty_boxes;
                 vector<float> empty_scores;
@@ -780,14 +1021,46 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                     result_time - last_summary_time).count() >= 1000) {
                 const float mean_period = frame_period_ms.Mean();
                 const float fps = mean_period > 0.001f ? 1000.0f / mean_period : 0.0f;
-                const char* id_label =
-                    (identity_result.valid && !identity_result.expired) ? "id_tmp" : "unknown";
-                printf("[FOCUS] fps=%.1f p95=%.1fms eyes=%zu pairs=%zu score=%.3f id=%s face_runs=%llu lost=%d\n",
-                       fps, result_latency_ms.Percentile(0.95f),
-                       eye_result.eyes.size(), eye_result.pairs.size(),
-                       eye_result.max_class_score, id_label,
-                       static_cast<unsigned long long>(faceid_runs),
-                       eye_result.lost_frames);
+                if (tracker_config.mode == FocusTrackingMode::NO_NPU_TRACKER) {
+                    const MotionGuardTrack* selected =
+                        motion_result.selected_index >= 0 &&
+                        motion_result.selected_index <
+                            static_cast<int>(motion_result.tracks.size())
+                            ? &motion_result.tracks[motion_result.selected_index] : nullptr;
+                    printf("[%s] 状态=%s FPS=%.1f 有效目标=%d",
+                           motion_scene_name_cn(motion_scene),
+                           motion_display_state_name_cn(motion_result),
+                           fps, motion_result.active_targets);
+                    if (selected != nullptr) {
+                        printf(" 关注目标=#%llu 方向=%s 风险=%.0f%%",
+                               static_cast<unsigned long long>(selected->id),
+                               motion_direction_name_cn(selected),
+                               selected->risk);
+                    }
+                    printf("\n");
+                    if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                        printf("[MOTION_VERIFY] p95=%.1fms bg=%d fg=%.3f "
+                               "internal_tracks=%zu vx=%.2f vy=%.2f growth=%.3f\n",
+                               result_latency_ms.Percentile(0.95f),
+                               motion_result.background_ready ? 1 : 0,
+                               motion_result.foreground_ratio,
+                               motion_result.tracks.size(),
+                               selected != nullptr ? selected->vx : 0.0f,
+                               selected != nullptr ? selected->vy : 0.0f,
+                               selected != nullptr ? selected->area_growth : 0.0f);
+                    }
+                } else {
+                    const char* id_label =
+                        (identity_result.valid && !identity_result.expired)
+                            ? "id_tmp" : "unknown";
+                    printf("[FOCUS] fps=%.1f p95=%.1fms eyes=%zu pairs=%zu "
+                           "score=%.3f id=%s face_runs=%llu lost=%d\n",
+                           fps, result_latency_ms.Percentile(0.95f),
+                           eye_result.eyes.size(), eye_result.pairs.size(),
+                           eye_result.max_class_score, id_label,
+                           static_cast<unsigned long long>(faceid_runs),
+                           eye_result.lost_frames);
+                }
                 if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
                     printf("[FOCUS_PROF] capture=%.2f pre=%.2f npu=%.2f post=%.2f tracker=%.2f face=%.2f osd=%.2f period_p95=%.2f\n",
                            capture_ms.Mean(), preprocess_ms.Mean(), npu_ms.Mean(),

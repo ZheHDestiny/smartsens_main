@@ -6,6 +6,7 @@
 
 #include "osd-device.hpp"
 #include "common.hpp"
+#include "motion_guard.hpp"
 #include <algorithm>
 #include <vector>
 #include <array>
@@ -29,7 +30,9 @@ namespace utils {
 
 class VISUALIZER {
 public:
-    void Initialize(std::array<int, 2>& in_img_shape, const std::string& bitmap_lut_path = "");
+    void Initialize(std::array<int, 2>& in_img_shape,
+                    const std::string& bitmap_lut_path = "",
+                    int image_dma_size = 0x100000);
     void Release();
     void Clear();
 
@@ -48,6 +51,13 @@ public:
     void DrawFocusIdentity(bool identity_matched, int fov_right, int fov_top);
     void DrawFocusConfidence(float eye_confidence, float identity_confidence);
     void DrawFocusEnrollmentFlash(const std::array<float, 4>& fov, bool visible);
+    void DrawMotionGuard(const MotionGuardResult& result,
+                         int crop_x,
+                         int crop_y,
+                         int crop_width,
+                         int crop_height,
+                         int process_width,
+                         int process_height);
     void DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
                    const std::vector<float>& scores,
                    const std::vector<int>& class_ids,
@@ -71,6 +81,11 @@ private:
     int m_height;  
     std::string m_bitmap_lut_path_full;  
     bool enabled_ = false;
+    int last_motion_scene_ = -1;
+    int last_motion_state_ = -1;
+    int last_motion_system_state_ = -1;
+    int last_optical_priority_ = -1;
+    int last_optical_region_ = -1;
 
     static const int LAYER_FEATURES  = 0;
     static const int LAYER_OBSTACLES = 1;

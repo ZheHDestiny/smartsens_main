@@ -89,7 +89,8 @@ public:
     OsdDevice();
     ~OsdDevice();
 
-    void Initialize(int width, int height, const char* bitmap_lut_path = nullptr);
+    void Initialize(int width, int height, const char* bitmap_lut_path = nullptr,
+                    int image_dma_size = 0x100000);
     void Release();
     bool IsEnabled() const { return m_osd_enabled; }
 
@@ -113,6 +114,7 @@ private:
     fdevice::DMA_BUFFER_ATTR_S m_layer_dma[OSD_LAYER_SIZE];
     bool m_layer_created[OSD_LAYER_SIZE] = {false};
     bool m_osd_enabled = false;
+    bool m_device_opened = false;
     fdevice::VERTEXS_S m_qrangle_out, m_qrangle_in;
 };
 

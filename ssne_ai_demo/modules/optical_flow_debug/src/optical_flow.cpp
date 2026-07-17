@@ -174,6 +174,18 @@ static void grid_sample(std::vector<FeaturePoint>& features,
     features.swap(result);
 }
 
+static float median_value(std::vector<float>* values) {
+    if (values == nullptr || values->empty()) return 0.0f;
+    const size_t middle = values->size() / 2;
+    std::nth_element(values->begin(), values->begin() + middle, values->end());
+    float median = (*values)[middle];
+    if ((values->size() & 1U) == 0U) {
+        std::nth_element(values->begin(), values->begin() + middle - 1, values->end());
+        median = 0.5f * (median + (*values)[middle - 1]);
+    }
+    return median;
+}
+
 
 void OPTICALFLOW::Initialize(int width, int height) {
     width_ = width;
@@ -181,6 +193,7 @@ void OPTICALFLOW::Initialize(int width, int height) {
 
     max_features = 120;
     fast_threshold = 22;
+    feature_scan_step = 1;
     nms_radius = 8;
     grid_size = 5;
     grid_max_per_cell = 6;
@@ -202,30 +215,65 @@ void OPTICALFLOW::DetectFeatures(const uint8_t* frame,
     if (frame == nullptr) return;
 
     const int margin = 4;
-    features.reserve(2000);
+    const int scan_step = std::max(1, feature_scan_step);
+    const int grid_cols = std::max(1, grid_size);
+    const int grid_rows = std::max(1,
+        (grid_cols * height_ + width_ / 2) / width_);
+    const int per_cell = std::max(1, grid_max_per_cell);
+    const int cell_count = grid_cols * grid_rows;
+    std::vector<std::vector<FeaturePoint>> cells(cell_count);
+    for (auto& cell : cells) cell.reserve(per_cell);
 
-    for (int row = margin; row < height_ - margin; row++) {
-        for (int col = margin; col < width_ - margin; col++) {
-            float score = fast9_score(frame, width_, height_, row, col, fast_threshold);
-            if (score > 0.0f) {
-                features.emplace_back((float)col, (float)row, score);
+    // Scene-complexity invariant FAST: each spatial cell owns a tiny fixed
+    // quota. A cluttered road scene therefore stops scanning a cell as soon
+    // as enough usable corners are found instead of collecting and sorting
+    // thousands of candidates. Sparse scenes still receive the full scan,
+    // where FAST's four-pixel early rejection is inexpensive.
+    for (int gy = 0; gy < grid_rows; ++gy) {
+        const int y0 = std::max(margin, gy * height_ / grid_rows);
+        const int y1 = std::min(height_ - margin, (gy + 1) * height_ / grid_rows);
+        for (int gx = 0; gx < grid_cols; ++gx) {
+            const int x0 = std::max(margin, gx * width_ / grid_cols);
+            const int x1 = std::min(width_ - margin, (gx + 1) * width_ / grid_cols);
+            std::vector<FeaturePoint>& cell = cells[gy * grid_cols + gx];
+            for (int row = y0; row < y1 && static_cast<int>(cell.size()) < per_cell;
+                 row += scan_step) {
+                for (int col = x0; col < x1 && static_cast<int>(cell.size()) < per_cell;
+                     col += scan_step) {
+                    const float score = fast9_score(frame, width_, height_, row, col,
+                                                    fast_threshold);
+                    if (score <= 0.0f) continue;
+                    bool separated = true;
+                    for (const auto& accepted : cell) {
+                        const float dx = accepted.x - col;
+                        const float dy = accepted.y - row;
+                        if (dx * dx + dy * dy < nms_radius * nms_radius) {
+                            separated = false;
+                            break;
+                        }
+                    }
+                    if (separated) {
+                        cell.emplace_back(static_cast<float>(col),
+                                          static_cast<float>(row), score);
+                    }
+                }
             }
         }
     }
 
-    nms_features(features, nms_radius, width_, height_);
-
-    if (grid_size > 0) {
-        grid_sample(features, width_, height_, grid_size, grid_max_per_cell);
+    features.reserve(std::min(max_features, cell_count * per_cell));
+    // Round-robin extraction keeps every image region represented before any
+    // cell contributes its second point.
+    for (int rank = 0; rank < per_cell && static_cast<int>(features.size()) < max_features;
+         ++rank) {
+        for (const auto& cell : cells) {
+            if (rank < static_cast<int>(cell.size())) {
+                features.push_back(cell[rank]);
+                if (static_cast<int>(features.size()) >= max_features) break;
+            }
+        }
     }
 
-    if ((int)features.size() > max_features) {
-        std::sort(features.begin(), features.end(),
-                  [](const FeaturePoint& a, const FeaturePoint& b) {
-                      return a.score > b.score;
-                  });
-        features.resize(max_features);
-    }
 }
 
 float OPTICALFLOW::Interp(const uint8_t* img, int w, int h, float x, float y) {
@@ -263,6 +311,9 @@ void OPTICALFLOW::BuildPyramid(const uint8_t* frame,
 
     int w0 = width_;
     int h0 = height_;
+    // Keep level 0 as a contiguous copy. Spatial denoising here used to scan
+    // two full 720x540 frames on every iteration; the LK patch and the robust
+    // multi-point risk estimator already suppress isolated sensor noise.
     pyramid[0].assign(frame, frame + w0 * h0);
     pyr_widths_[0] = w0;
     pyr_heights_[0] = h0;
@@ -303,7 +354,8 @@ void OPTICALFLOW::BuildPyramid(const uint8_t* frame,
 bool OPTICALFLOW::TrackPointSingleLevel(const uint8_t* prev, const uint8_t* curr,
                                          int w, int h,
                                          float px, float py,
-                                         float& cx, float& cy) {
+                                         float& cx, float& cy,
+                                         float* photometric_error) {
     int win = lk_win_size;
 
     if (px - win < 1 || px + win >= w - 1 ||
@@ -364,6 +416,7 @@ bool OPTICALFLOW::TrackPointSingleLevel(const uint8_t* prev, const uint8_t* curr
         }
 
         float b0 = 0, b1 = 0;
+        float absolute_error = 0.0f;
         idx = 0;
         for (int dy = -win; dy <= win; dy++) {
             for (int dx = -win; dx <= win; dx++) {
@@ -372,8 +425,13 @@ bool OPTICALFLOW::TrackPointSingleLevel(const uint8_t* prev, const uint8_t* curr
 
                 b0 += diff * Ix_buf[idx];
                 b1 += diff * Iy_buf[idx];
+                absolute_error += std::fabs(diff);
                 idx++;
             }
+        }
+
+        if (photometric_error != nullptr) {
+            *photometric_error = absolute_error / patch_n;
         }
 
         float ddx = Hi00 * b0 + Hi01 * b1;
@@ -400,13 +458,15 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
 
     if (features.empty()) return;
 
-    BuildPyramid(prev_frame, pyramid_prev_);
+    if (!pyramid_cache_valid_) {
+        BuildPyramid(prev_frame, pyramid_prev_);
+    }
     BuildPyramid(curr_frame, pyramid_curr_);
 
     int levels = (int)pyramid_prev_.size();
-    int tracked_count = 0;
-
     for (auto& f : features) {
+        const float old_x = f.x;
+        const float old_y = f.y;
         float scale = 1.0f / (1 << (levels - 1));
         float px = f.x * scale;  
         float py = f.y * scale;
@@ -414,6 +474,7 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
         float cy = py;
 
         bool success = true;
+        float photometric_error = 0.0f;
 
         for (int lv = levels - 1; lv >= 0; lv--) {
             const uint8_t* prev_img = pyramid_prev_[lv].data();
@@ -422,7 +483,8 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
             int h = pyr_heights_[lv];
 
             success = TrackPointSingleLevel(prev_img, curr_img, w, h,
-                                            px, py, cx, cy);
+                                            px, py, cx, cy,
+                                            lv == 0 ? &photometric_error : nullptr);
             if (!success) break;
 
             if (lv > 0) {
@@ -434,18 +496,40 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
         }
 
         if (success) {
-            f.dx = cx - f.x;   
-            f.dy = cy - f.y;
+            const float flow_x = cx - old_x;
+            const float flow_y = cy - old_y;
+            const float flow_sq = flow_x * flow_x + flow_y * flow_y;
+            // A final patch residual catches occlusion and gross mismatches at
+            // a fraction of the cost of running a complete backward LK pass.
+            // The regional median and support threshold reject remaining
+            // isolated outliers before they can become an obstacle alert.
+            if (photometric_error > 20.0f || flow_sq > 900.0f) {
+                f.dx = 0.0f;
+                f.dy = 0.0f;
+                f.tracked = false;
+                continue;
+            }
+            f.dx = flow_x;
+            f.dy = flow_y;
             f.x = cx;           
             f.y = cy;
             f.tracked = true;
-            tracked_count++;
         } else {
             f.dx = 0.0f;
             f.dy = 0.0f;
             f.tracked = false;
         }
     }
+
+    // Reuse this frame's pyramid as the next frame's previous pyramid.
+    // ResetHistory() is called whenever the frame sequence is interrupted or
+    // feature detection replaces the active tracks.
+    pyramid_prev_.swap(pyramid_curr_);
+    pyramid_cache_valid_ = true;
+}
+
+void OPTICALFLOW::ResetHistory() {
+    pyramid_cache_valid_ = false;
 }
 
 void OPTICALFLOW::Release() {
@@ -453,6 +537,7 @@ void OPTICALFLOW::Release() {
     pyramid_curr_.clear();
     pyr_widths_.clear();
     pyr_heights_.clear();
+    pyramid_cache_valid_ = false;
     printf("[OPTICALFLOW] Released\n");
 }
 
@@ -460,18 +545,29 @@ void OBSTACLE_DETECTOR::Initialize(int width, int height) {
     width_ = width;
     height_ = height;
 
-    ttc_threshold = 0.8f;
-    divergence_threshold = 0.65f;
+    ttc_threshold = 2.0f;
+    divergence_threshold = 0.45f;
+    frame_interval_seconds_ = 1.0f / 75.0f;
+    std::fill(smoothed_danger_, smoothed_danger_ + ObstacleInfo::REGION_COUNT, 0.0f);
+    std::fill(latched_obstacle_, latched_obstacle_ + ObstacleInfo::REGION_COUNT, false);
 
     printf("[OBSTACLE_DETECTOR] Initialized: %d x %d\n", width_, height_);
 }
 
-float OBSTACLE_DETECTOR::ComputeTTC(float x, float y, float dx, float dy) {
+void OBSTACLE_DETECTOR::SetFrameInterval(float seconds) {
+    if (std::isfinite(seconds) && seconds > 0.002f && seconds < 0.2f) {
+        frame_interval_seconds_ = seconds;
+    }
+}
+
+float OBSTACLE_DETECTOR::ComputeTTC(float x, float y, float dx, float dy) const {
     float foe_x = width_ / 2.0f;
     float foe_y = height_ / 2.0f;
 
-    float dist_x = foe_x - x;
-    float dist_y = foe_y - y;
+    // Radial direction points away from the focus of expansion. An approaching
+    // object/camera produces positive expansion in this direction.
+    float dist_x = x - foe_x;
+    float dist_y = y - foe_y;
     float dist = std::sqrt(dist_x * dist_x + dist_y * dist_y);
 
     if (dist < 1.0f) return 1e6f;  
@@ -481,105 +577,97 @@ float OBSTACLE_DETECTOR::ComputeTTC(float x, float y, float dx, float dy) {
 
     float radial_velocity = dx * dist_x + dy * dist_y;
 
-    if (radial_velocity < 0.01f) return 1e6f;  
+    if (radial_velocity < 0.03f) return 1e6f;
 
-    float ttc = dist / radial_velocity;
+    float ttc = dist * frame_interval_seconds_ / radial_velocity;
     return std::max(0.0f, ttc);
-}
-
-float OBSTACLE_DETECTOR::ComputeDivergence(const std::vector<FeaturePoint>& features) {
-    if (features.empty()) return 0.0f;
-
-    float div_sum = 0.0f;
-    int count = 0;
-
-    for (const auto& f : features) {
-        if (!f.tracked) continue;
-
-        float dist_x = f.x - (width_ / 2.0f);
-        float dist_y = f.y - (height_ / 2.0f);
-        float dist = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-
-        if (dist > 1.0f) {
-            dist_x /= dist;
-            dist_y /= dist;
-            float radial = f.dx * dist_x + f.dy * dist_y;
-            div_sum += radial;
-            count++;
-        }
-    }
-
-    return count > 0 ? div_sum / count : 0.0f;
 }
 
 void OBSTACLE_DETECTOR::DetectObstacles(const std::vector<FeaturePoint>& features,
                                         ObstacleInfo& obstacle_info) {
-    for (int i = 0; i < ObstacleInfo::REGION_COUNT; i++) {
-        obstacle_info.danger_level[i] = 0.0f;
-        obstacle_info.has_obstacle[i] = false;
+    std::vector<float> global_x;
+    std::vector<float> global_y;
+    global_x.reserve(features.size());
+    global_y.reserve(features.size());
+    for (const auto& f : features) {
+        if (f.tracked) {
+            global_x.push_back(f.dx);
+            global_y.push_back(f.dy);
+        }
     }
-    obstacle_info.priority = 4;  
+    obstacle_info.tracking_quality = features.empty() ? 0.0f :
+        static_cast<float>(global_x.size()) / features.size();
+    obstacle_info.global_dx = median_value(&global_x);
+    obstacle_info.global_dy = median_value(&global_y);
 
-    if (features.empty()) {
-        return;
-    }
-
-    float region_width = width_ / 3.0f;
-    float min_ttc[ObstacleInfo::REGION_COUNT] = {1e6f, 1e6f, 1e6f};
-    float region_div_sum[ObstacleInfo::REGION_COUNT] = {0.0f, 0.0f, 0.0f};
-    int region_div_cnt[ObstacleInfo::REGION_COUNT] = {0, 0, 0};
-
+    std::vector<float> region_ttc[ObstacleInfo::REGION_COUNT];
+    std::vector<float> region_radial[ObstacleInfo::REGION_COUNT];
+    const float region_width = width_ / 3.0f;
     for (const auto& f : features) {
         if (!f.tracked) continue;
-
-        int region = (int)(f.x / region_width);
-        region = std::min(region, (int)ObstacleInfo::REGION_COUNT - 1);
-
-        float ttc = ComputeTTC(f.x, f.y, f.dx, f.dy);
-        min_ttc[region] = std::min(min_ttc[region], ttc);
-
-        float dist_x = f.x - (width_ / 2.0f);
-        float dist_y = f.y - (height_ / 2.0f);
-        float dist = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-        if (dist > 1.0f) {
-            dist_x /= dist;
-            dist_y /= dist;
-            float radial = f.dx * dist_x + f.dy * dist_y;
-            region_div_sum[region] += radial;
-            region_div_cnt[region]++;
-        }
+        const int region = std::min(static_cast<int>(f.x / region_width),
+                                    static_cast<int>(ObstacleInfo::REGION_COUNT) - 1);
+        const float flow_x = f.dx - obstacle_info.global_dx;
+        const float flow_y = f.dy - obstacle_info.global_dy;
+        const float rx = f.x - width_ * 0.5f;
+        const float ry = f.y - height_ * 0.5f;
+        const float radius = std::sqrt(rx * rx + ry * ry);
+        if (radius < 20.0f) continue;
+        const float radial = (flow_x * rx + flow_y * ry) / radius;
+        if (radial <= 0.03f) continue;
+        region_radial[region].push_back(radial);
+        region_ttc[region].push_back(ComputeTTC(f.x, f.y, flow_x, flow_y));
     }
 
-    int max_priority = 4;  
-
-    for (int i = 0; i < ObstacleInfo::REGION_COUNT; i++) {
-        float region_divergence =
-            (region_div_cnt[i] > 0) ? (region_div_sum[i] / region_div_cnt[i]) : 0.0f;
-
-        if (min_ttc[i] < ttc_threshold) {
-            obstacle_info.has_obstacle[i] = true;
-            obstacle_info.danger_level[i] = 1.0f - (min_ttc[i] / ttc_threshold);
-            max_priority = std::min(max_priority, 0);  
-        } else if (region_divergence > divergence_threshold) {
-            obstacle_info.has_obstacle[i] = true;
-            obstacle_info.danger_level[i] = std::min(1.0f, region_divergence / (2.0f * divergence_threshold));
-            max_priority = std::min(max_priority, 1);  
-        }
-    }
-
-    obstacle_info.priority = max_priority;
-
-    int most_dangerous = ObstacleInfo::CENTER;
+    obstacle_info.priority = ObstacleInfo::CLEAR;
+    obstacle_info.most_dangerous_region = ObstacleInfo::CENTER;
+    obstacle_info.safest_region = ObstacleInfo::CENTER;
     float max_danger = -1.0f;
-    for (int i = 0; i < ObstacleInfo::REGION_COUNT; i++) {
+    float min_danger = 2.0f;
+    for (int i = 0; i < ObstacleInfo::REGION_COUNT; ++i) {
+        obstacle_info.support_count[i] = static_cast<int>(region_radial[i].size());
+        const bool enough_support = obstacle_info.support_count[i] >= 3;
+        float raw_danger = 0.0f;
+        float robust_ttc = -1.0f;
+        if (enough_support) {
+            const float median_radial = median_value(&region_radial[i]);
+            robust_ttc = median_value(&region_ttc[i]);
+            const float ttc_risk = robust_ttc < ttc_threshold
+                ? 1.0f - robust_ttc / ttc_threshold : 0.0f;
+            const float expansion_risk = std::min(1.0f,
+                std::max(0.0f, (median_radial - divergence_threshold) /
+                               (2.0f * divergence_threshold)));
+            raw_danger = std::max(ttc_risk, 0.65f * expansion_risk);
+        }
+        smoothed_danger_[i] = 0.68f * smoothed_danger_[i] + 0.32f * raw_danger;
+        if (latched_obstacle_[i]) {
+            latched_obstacle_[i] = smoothed_danger_[i] > 0.18f;
+        } else {
+            latched_obstacle_[i] = enough_support && smoothed_danger_[i] > 0.35f;
+        }
+        obstacle_info.danger_level[i] = smoothed_danger_[i];
+        obstacle_info.ttc_seconds[i] = enough_support ? robust_ttc : -1.0f;
+        obstacle_info.has_obstacle[i] = latched_obstacle_[i];
         if (obstacle_info.danger_level[i] > max_danger) {
             max_danger = obstacle_info.danger_level[i];
-            most_dangerous = i;
+            obstacle_info.most_dangerous_region = i;
+        }
+        if (obstacle_info.danger_level[i] < min_danger) {
+            min_danger = obstacle_info.danger_level[i];
+            obstacle_info.safest_region = i;
+        }
+        if (latched_obstacle_[i]) {
+            const bool emergency = (robust_ttc > 0.0f && robust_ttc < 1.0f) ||
+                                   smoothed_danger_[i] > 0.70f;
+            obstacle_info.priority = std::min(obstacle_info.priority,
+                emergency ? static_cast<int>(ObstacleInfo::EMERGENCY)
+                          : static_cast<int>(ObstacleInfo::CAUTION));
         }
     }
-    obstacle_info.most_dangerous_region = most_dangerous;
 }
 
 void OBSTACLE_DETECTOR::Release() {
+    std::fill(smoothed_danger_, smoothed_danger_ + ObstacleInfo::REGION_COUNT, 0.0f);
+    std::fill(latched_obstacle_, latched_obstacle_ + ObstacleInfo::REGION_COUNT, false);
     printf("[OBSTACLE_DETECTOR] Released\n");
 }

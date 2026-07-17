@@ -65,6 +65,11 @@ static void keyboard_listener() {
             else if (input == "p" || input == "P") {
                 g_pause_flag = !g_pause_flag;
             }
+            else if (input.empty()) {
+                // Serial terminals may send CR/LF as two events. Ignore the
+                // empty event instead of reporting a false invalid command.
+                continue;
+            }
             else {
                 printf("[键盘监听]  无效指令: '%s' (仅支持 p/P 或 q/Q)\n", input.c_str());
             }
@@ -80,6 +85,30 @@ static bool check_exit_flag() {
 static bool check_pause_flag() {
     lock_guard<mutex> lock(g_mtx);
     return g_pause_flag;
+}
+
+static const char* region_name(int region) {
+    switch (region) {
+        case ObstacleInfo::LEFT: return "左侧";
+        case ObstacleInfo::RIGHT: return "右侧";
+        default: return "中间";
+    }
+}
+
+static const char* clear_corridor_name(int region) {
+    switch (region) {
+        case ObstacleInfo::LEFT: return "左侧通道";
+        case ObstacleInfo::RIGHT: return "右侧通道";
+        default: return "中间通道";
+    }
+}
+
+static const char* optical_state_name(int priority) {
+    switch (priority) {
+        case ObstacleInfo::EMERGENCY: return "紧急制动";
+        case ObstacleInfo::CAUTION: return "注意避障";
+        default: return "通道安全";
+    }
 }
 
 /**
@@ -127,21 +156,28 @@ int run_optical_flow_debug() {
     OPTICALFLOW optical_flow;
     optical_flow.Initialize(proc_shape[0], proc_shape[1]);
     
-    optical_flow.max_features = 80;         
-    optical_flow.fast_threshold = 25;       
-    optical_flow.pyramid_levels = 2;        
-    optical_flow.lk_max_iter = 6;           
-    optical_flow.lk_win_size = 3;           
+    // Cortex-A7 real-time profile. Robustness is retained in the regional
+    // median/TTC/hysteresis stage, so LK itself can remain compact.
+    optical_flow.max_features = 80;
+    optical_flow.fast_threshold = 24;
+    optical_flow.feature_scan_step = 2;
+    optical_flow.grid_size = 8;
+    optical_flow.grid_max_per_cell = 2;
+    optical_flow.pyramid_levels = 2;
+    optical_flow.lk_max_iter = 6;
+    optical_flow.lk_win_size = 3;
 
     OBSTACLE_DETECTOR obstacle_detector;
     obstacle_detector.Initialize(proc_shape[0], proc_shape[1]);
-    obstacle_detector.ttc_threshold = 1.0f;
-    obstacle_detector.divergence_threshold = 0.5f;
+    obstacle_detector.ttc_threshold = 2.0f;
+    obstacle_detector.divergence_threshold = 0.45f;
 
     VISUALIZER visualizer;
     bool osd_present = module_loaded("osd_kmod") || dev_exists("/dev/osddev") || dev_exists("/dev/osd0");
     if (osd_present) {
-        visualizer.Initialize(img_shape); // 默认无位图参数
+        // This mode uses only a compact status bitmap, not a full-screen RLE
+        // texture. Smaller image buffers avoid OSD CMA fragmentation.
+        visualizer.Initialize(img_shape, "", 0x20000);
         printf("  ✓ OSD 可视化器初始化完成\n\n");
     }
 
@@ -165,12 +201,14 @@ int run_optical_flow_debug() {
     uint32_t obstacle_frame_count = 0;
     uint32_t paused_frame_count = 0;
     bool first_frame = true;
+    uint32_t last_feature_detect_frame = 0;
 
     int last_log_priority = 4;
-    int last_danger_region = -1;
-    uint32_t last_log_frame = 0;
+    auto last_status_report = std::chrono::steady_clock::now();
+    auto last_event_log = last_status_report - std::chrono::seconds(1);
     
     auto program_start_time = std::chrono::steady_clock::now();
+    auto last_frame_time = program_start_time;
     std::chrono::duration<float> total_paused_time(0); 
     std::chrono::steady_clock::time_point frame_times[10];
     for (int i = 0; i < 10; i++) {
@@ -222,17 +260,27 @@ int run_optical_flow_debug() {
         image_processor.GetImage(&curr_frame);
         
         if (curr_frame.data == nullptr) {
+            prev_ptr = nullptr;
+            prev_buf.clear();
+            features.clear();
+            first_frame = true;
+            optical_flow.ResetHistory();
             usleep(10000);
             continue;
         }
         curr_ptr = (uint8_t*)get_data(curr_frame);
 
         auto now = std::chrono::steady_clock::now();
+        obstacle_detector.SetFrameInterval(
+            std::chrono::duration<float>(now - last_frame_time).count());
+        last_frame_time = now;
         frame_times[frame_count % 10] = now;
         frame_count++;
 
         if (first_frame) {
             optical_flow.DetectFeatures(curr_ptr, features);
+            optical_flow.ResetHistory();
+            last_feature_detect_frame = frame_count;
             printf("[系统] 首帧准备就绪, 提取 %zu 个特征点...\n", features.size());
             first_frame = false;
         } else {
@@ -250,33 +298,60 @@ int run_optical_flow_debug() {
             int curr_priority = obstacle_info.priority;
             int curr_region = obstacle_info.most_dangerous_region;
 
-            if (curr_priority == 0) {
-                bool is_new_alert = (last_log_priority != 0); 
-                bool region_changed = (curr_region != last_danger_region); 
-                bool low_freq_tick = (frame_count - last_log_frame >= 15); 
-
-                if (is_new_alert || region_changed || low_freq_tick) {
-                    float danger_val = obstacle_info.danger_level[curr_region];
-                    char reg_char = (curr_region == 0) ? 'L' : ((curr_region == 1) ? 'C' : 'R');
-                    
-                    printf("[ALERT] f=%d reg=%c danger=%.2f tracked=%d/%zu\n",
-                           frame_count, reg_char, danger_val, tracked_count, features.size());
-                    
-                    last_log_frame = frame_count;
+            const bool state_changed = curr_priority != last_log_priority;
+            const bool emergency_entered = curr_priority == ObstacleInfo::EMERGENCY &&
+                                           last_log_priority != ObstacleInfo::EMERGENCY;
+            const bool event_log_due =
+                std::chrono::duration<float>(now - last_event_log).count() >= 0.5f;
+            if (state_changed && (emergency_entered || event_log_due)) {
+                if (curr_priority == ObstacleInfo::EMERGENCY) {
+                    printf("[避障][紧急] %s快速接近；建议优先保持%s，TTC≈%.1fs，可靠点=%d。\n",
+                           region_name(curr_region),
+                           clear_corridor_name(obstacle_info.safest_region),
+                           obstacle_info.ttc_seconds[curr_region],
+                           obstacle_info.support_count[curr_region]);
+                } else if (curr_priority == ObstacleInfo::CAUTION) {
+                    printf("[避障][提示] %s存在接近趋势；建议关注%s，风险=%.0f%%。\n",
+                           region_name(curr_region),
+                           clear_corridor_name(obstacle_info.safest_region),
+                           100.0f * obstacle_info.danger_level[curr_region]);
+                } else if (last_log_priority != ObstacleInfo::CLEAR) {
+                    printf("[避障][恢复] 风险已解除；推荐通行%s。\n",
+                           clear_corridor_name(obstacle_info.safest_region));
                 }
-            } else if (last_log_priority == 0 && curr_priority != 0) {
-                printf("[RECOVER] f=%d\n", frame_count);
+                last_event_log = now;
+            }
+
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY) &&
+                std::chrono::duration<float>(now - last_status_report).count() >= 2.0f) {
+                const int sample_count = std::min(frame_count, static_cast<uint32_t>(10));
+                const auto oldest = frame_times[(frame_count + 10 - sample_count) % 10];
+                const float elapsed = std::chrono::duration<float>(now - oldest).count();
+                const float fps = elapsed > 0.001f ? sample_count / elapsed : 0.0f;
+                printf("[避障] 状态=%s FPS=%.1f 跟踪=%d/%zu 推荐=%s 质量=%.0f%%\n",
+                       optical_state_name(curr_priority), fps, tracked_count, features.size(),
+                       clear_corridor_name(obstacle_info.safest_region),
+                       100.0f * obstacle_info.tracking_quality);
+                last_status_report = now;
             }
             
             last_log_priority = curr_priority;
-            last_danger_region = curr_region;
 
             if (curr_priority < 4) obstacle_frame_count++;
 
-            visualizer.DrawAll(features, obstacle_info,370,frame_count);
+            // 15-20 Hz remains visually smooth; state transitions still
+            // refresh immediately.
+            if ((frame_count % 5) == 0 || emergency_entered) {
+                visualizer.DrawAll(features, obstacle_info,370,frame_count);
+            }
 
-            if (tracked_count < 15) {
+            const uint32_t frames_since_detect = frame_count - last_feature_detect_frame;
+            const bool low_feature_refresh = tracked_count < 20 && frames_since_detect >= 6;
+            const bool periodic_refresh = frames_since_detect >= 120;
+            if (low_feature_refresh || periodic_refresh) {
                 optical_flow.DetectFeatures(curr_ptr, features);
+                optical_flow.ResetHistory();
+                last_feature_detect_frame = frame_count;
             }
         }
 

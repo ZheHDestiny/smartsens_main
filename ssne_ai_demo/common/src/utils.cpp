@@ -742,7 +742,6 @@ void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
                            const std::vector<int>& directions,
                            int crop_offset_y,
                            int crop_height) {
-    (void)scores;
     if (!enabled_) return;
     if (crop_height > 0) {
         DrawMask(crop_offset_y, crop_height);
@@ -753,11 +752,53 @@ void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
 
     std::vector<OsdQR> quad_rangle_vec;
 
-    for (size_t i = 0; i < boxes.size(); i++) {
-        int xmin = static_cast<int>(boxes[i][0]);
-        int ymin = static_cast<int>(boxes[i][1]);
-        int xmax = static_cast<int>(boxes[i][2]);
-        int ymax = static_cast<int>(boxes[i][3]);
+    // OSD layer 0 has a limited number of quadrangles. Keep the three most
+    // confident detections and validate every primitive before submitting it.
+    // This also prevents a fast-moving arrow from producing an off-screen
+    // quadrangle, which makes OsdDevice::Draw() fail with ret=-1.
+    const size_t detection_count = std::min(boxes.size(), class_ids.size());
+    std::vector<size_t> draw_order(detection_count);
+    for (size_t i = 0; i < detection_count; ++i) draw_order[i] = i;
+    std::sort(draw_order.begin(), draw_order.end(), [&](size_t lhs, size_t rhs) {
+        const float lhs_score = lhs < scores.size() ? scores[lhs] : 0.0f;
+        const float rhs_score = rhs < scores.size() ? scores[rhs] : 0.0f;
+        return lhs_score > rhs_score;
+    });
+    if (draw_order.size() > 3) draw_order.resize(3);
+
+    const int osd_width = std::max(1, m_width);
+    const int osd_height = std::max(1, m_height);
+    const auto clamp_x = [osd_width](int value) {
+        return std::max(0, std::min(value, osd_width - 1));
+    };
+    const auto clamp_y = [osd_height](int value) {
+        return std::max(0, std::min(value, osd_height - 1));
+    };
+    const auto append_solid_rect = [&](int x0, int y0, int x1, int y1,
+                                       int color, fdevice::ALPHATYPE alpha) {
+        x0 = clamp_x(x0);
+        x1 = clamp_x(x1);
+        y0 = clamp_y(y0);
+        y1 = clamp_y(y1);
+        if (x1 <= x0 || y1 <= y0) return;
+        OsdQR rect;
+        rect.box = {static_cast<float>(x0), static_cast<float>(y0),
+                    static_cast<float>(x1), static_cast<float>(y1)};
+        rect.border = 0;
+        rect.color = color;
+        rect.alpha = alpha;
+        rect.type = fdevice::TYPE_SOLID;
+        rect.layer_id = DETECTION_LAYER_ID;
+        quad_rangle_vec.emplace_back(rect);
+    };
+
+    for (size_t order_pos = 0; order_pos < draw_order.size(); ++order_pos) {
+        const size_t i = draw_order[order_pos];
+        int xmin = clamp_x(static_cast<int>(boxes[i][0]));
+        int ymin = clamp_y(static_cast<int>(boxes[i][1]));
+        int xmax = clamp_x(static_cast<int>(boxes[i][2]));
+        int ymax = clamp_y(static_cast<int>(boxes[i][3]));
+        if (xmax <= xmin || ymax <= ymin) continue;
         
         int cid = class_ids[i];
         int box_color;
@@ -779,7 +820,8 @@ void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
         }
         
         OsdQR q_box;
-        q_box.box = {static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(xmax), static_cast<float>(ymax)};
+        q_box.box = {static_cast<float>(xmin), static_cast<float>(ymin),
+                     static_cast<float>(xmax), static_cast<float>(ymax)};
         q_box.border = box_border; 
         q_box.color = box_color; 
         q_box.alpha = box_alpha;
@@ -787,38 +829,28 @@ void VISUALIZER::DrawSpeed(const std::vector<std::array<float, 4>>& boxes,
         q_box.layer_id = DETECTION_LAYER_ID;
         quad_rangle_vec.emplace_back(q_box);
 
-        float speed = speeds[i];
-        int dir = directions[i]; 
+        const float speed = i < speeds.size() ? speeds[i] : 0.0f;
+        const int dir = i < directions.size() ? directions[i] : 0;
         if (speed > 1.0f) { 
             int center_x = (xmin + xmax) / 2;
-            int arrow_y = std::max(10, ymin - 15);
-            int arrow_length = 20 + static_cast<int>(speed * 2); 
-            int tip_x = center_x + (dir * arrow_length);
-            
-            OsdQR q_stem;
-            q_stem.box = {static_cast<float>(std::min(center_x, tip_x)), static_cast<float>(arrow_y - 2), 
-                          static_cast<float>(std::max(center_x, tip_x)), static_cast<float>(arrow_y + 2)};
-            q_stem.border = 0;
-            q_stem.color = box_color;
-            q_stem.alpha = box_alpha;
-            q_stem.type = fdevice::TYPE_SOLID;
-            q_stem.layer_id = DETECTION_LAYER_ID;
-            quad_rangle_vec.emplace_back(q_stem);
+            const int arrow_y = clamp_y(std::max(10, ymin - 15));
+            const int arrow_length = std::min(80, 20 + static_cast<int>(speed * 2));
+            const int tip_x = clamp_x(center_x + ((dir >= 0 ? 1 : -1) * arrow_length));
 
-            OsdQR q_tip;
-            if (dir > 0) {
-                q_tip.box = {static_cast<float>(tip_x - 6), static_cast<float>(arrow_y - 8), 
-                             static_cast<float>(tip_x), static_cast<float>(arrow_y + 8)};
-            } else {       
-                q_tip.box = {static_cast<float>(tip_x), static_cast<float>(arrow_y - 8), 
-                             static_cast<float>(tip_x + 6), static_cast<float>(arrow_y + 8)};
+            // Keep both the speed-proportional tail and the arrow head. The
+            // three-vehicle cap still bounds this layer to at most nine
+            // validated quadrangles (three boxes plus two markers each).
+            if (dir >= 0) {
+                append_solid_rect(center_x, arrow_y - 2, tip_x, arrow_y + 2,
+                                  box_color, box_alpha);
+                append_solid_rect(tip_x - 6, arrow_y - 8, tip_x, arrow_y + 8,
+                                  box_color, box_alpha);
+            } else {
+                append_solid_rect(tip_x, arrow_y - 2, center_x, arrow_y + 2,
+                                  box_color, box_alpha);
+                append_solid_rect(tip_x, arrow_y - 8, tip_x + 6, arrow_y + 8,
+                                  box_color, box_alpha);
             }
-            q_tip.border = 0;
-            q_tip.color = box_color;
-            q_tip.alpha = box_alpha;
-            q_tip.type = fdevice::TYPE_SOLID;
-            q_tip.layer_id = DETECTION_LAYER_ID;
-            quad_rangle_vec.emplace_back(q_tip);
         }
     }
     osd_device.Draw(quad_rangle_vec, DETECTION_LAYER_ID);

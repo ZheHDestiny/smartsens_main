@@ -24,6 +24,11 @@ inline float IoU(const std::array<float, 4>& a, const std::array<float, 4>& b) {
     return inter / (area_a + area_b - inter);
 }
 
+// Letterbox 参数（供 Postprocess 做正确逆映射）
+static float g_letterbox_pad_x = 0.0f;
+static float g_letterbox_pad_y = 0.0f;
+static float g_letterbox_scale = 1.0f;
+
 void YOLOV8_OBJECT::Initialize(const std::string& model_path, std::array<int, 2>* in_img_shape, std::array<int, 2>* in_det_shape) {
     img_shape = *in_img_shape;
     det_shape = *in_det_shape;
@@ -38,11 +43,11 @@ void YOLOV8_OBJECT::Initialize(const std::string& model_path, std::array<int, 2>
 }
 
 void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_head,
-                              int height, int width, int stride, float conf_threshold,
-                              std::vector<std::array<float, 4>>& boxes,
-                              std::vector<float>& scores, std::vector<int>& class_ids) {
-    std::array<float, 16> softmax_buf = {}; 
-    const int spatial_size = height * width; 
+    int height, int width, int stride, float conf_threshold,
+    std::vector<std::array<float, 4>>& boxes,
+    std::vector<float>& scores, std::vector<int>& class_ids) {
+    std::array<float, 16> softmax_buf = {};
+    const int spatial_size = height * width;
     static bool printed_first_pixel = true;
 
     for (int y = 0; y < height; ++y) {
@@ -51,7 +56,7 @@ void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_he
 
             int best_class = 0;
             float best_score = Sigmoid(cls_head[spatial_idx * kNumClasses + 0]);
-            
+
             for (int cls_id = 1; cls_id < kNumClasses; ++cls_id) {
                 const float score = Sigmoid(cls_head[spatial_idx * kNumClasses + cls_id]);
                 if (score > best_score) {
@@ -65,16 +70,17 @@ void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_he
                 float max_logit = -1e9f;
                 for (int bin = 0; bin < kRegBins; ++bin) {
                     const int c = side * kRegBins + bin;
-                    max_logit = std::max(max_logit, reg_head[spatial_idx * (4 * kRegBins) + c]);}
+                    max_logit = std::max(max_logit, reg_head[spatial_idx * (4 * kRegBins) + c]);
+                }
                 float sum = 0.0f;
                 for (int bin = 0; bin < kRegBins; ++bin) {
                     const int c = side * kRegBins + bin;
                     float diff = reg_head[spatial_idx * (4 * kRegBins) + c] - max_logit;
-                    if (diff < -20.0f) diff = -20.0f; 
+                    if (diff < -20.0f) diff = -20.0f;
                     softmax_buf[bin] = std::exp(diff);
                     sum += softmax_buf[bin];
                 }
-                
+
                 float expectation = 0.0f;
                 for (int bin = 0; bin < kRegBins; ++bin) {
                     expectation += (softmax_buf[bin] / sum) * static_cast<float>(bin);
@@ -94,7 +100,7 @@ void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_he
             x2 = std::max(0.0f, std::min(x2, static_cast<float>(det_shape[0])));
             y2 = std::max(0.0f, std::min(y2, static_cast<float>(det_shape[1])));
 
-            boxes.push_back({x1, y1, x2, y2});
+            boxes.push_back({ x1, y1, x2, y2 });
             scores.push_back(best_score);
             class_ids.push_back(best_class);
         }
@@ -102,14 +108,14 @@ void YOLOV8_OBJECT::DecodeHeadOutputs(const float* cls_head, const float* reg_he
 }
 
 void YOLOV8_OBJECT::Postprocess(std::vector<std::array<float, 4>>* boxes,
-                        std::vector<float>* scores, std::vector<int>* class_ids,
-                        ObjectDetectionResult* result) {
+    std::vector<float>* scores, std::vector<int>* class_ids,
+    ObjectDetectionResult* result) {
     std::vector<int> order(boxes->size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
 
     std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
         return scores->at(lhs) > scores->at(rhs);
-    });
+        });
     if (static_cast<int>(order.size()) > top_k) order.resize(top_k);
 
     std::vector<int> keep;
@@ -131,11 +137,20 @@ void YOLOV8_OBJECT::Postprocess(std::vector<std::array<float, 4>>* boxes,
     result->Reserve(static_cast<int>(keep.size()));
     for (int idx : keep) {
         std::array<float, 4> box = boxes->at(idx);
-        box[0] = std::max(0.0f, std::min(box[0] * w_scale, static_cast<float>(img_shape[0])));
-        box[1] = std::max(0.0f, std::min(box[1] * h_scale, static_cast<float>(img_shape[1])));
-        box[2] = std::max(0.0f, std::min(box[2] * w_scale, static_cast<float>(img_shape[0])));
-        box[3] = std::max(0.0f, std::min(box[3] * h_scale, static_cast<float>(img_shape[1])));
-        result->boxes.emplace_back(box);
+
+        // 正确逆映射：从 letterbox 坐标系映射到原始图像坐标系
+        float x1 = (box[0] - g_letterbox_pad_x) / g_letterbox_scale;
+        float y1 = (box[1] - g_letterbox_pad_y) / g_letterbox_scale;
+        float x2 = (box[2] - g_letterbox_pad_x) / g_letterbox_scale;
+        float y2 = (box[3] - g_letterbox_pad_y) / g_letterbox_scale;
+
+        // 裁剪到图像边界
+        x1 = std::max(0.0f, std::min(x1, static_cast<float>(img_shape[0])));
+        y1 = std::max(0.0f, std::min(y1, static_cast<float>(img_shape[1])));
+        x2 = std::max(0.0f, std::min(x2, static_cast<float>(img_shape[0])));
+        y2 = std::max(0.0f, std::min(y2, static_cast<float>(img_shape[1])));
+
+        result->boxes.emplace_back(std::array<float, 4>{x1, y1, x2, y2});
         result->scores.emplace_back(scores->at(idx));
         result->class_ids.emplace_back(class_ids->at(idx));
     }
@@ -145,32 +160,78 @@ static ssne_tensor_t g_letterbox_tensor;
 static bool g_lb_init = false;
 
 void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, float conf_threshold) {
+    // ---------- 输入校验 ----------
+    if (img == nullptr) {
+        fprintf(stderr, "[ERROR] Predict received null img pointer\n");
+        result->Clear();
+        return;
+    }
+
+    uint8_t* sensor_data = (uint8_t*)get_data(*img);
+    if (sensor_data == nullptr) {
+        fprintf(stderr, "[ERROR] Input image data is null\n");
+        result->Clear();
+        return;
+    }
+
+    // 尝试从 tensor 读取实际尺寸，失败则回退到 img_shape
+    int src_w = get_width(*img);
+    int src_h = get_height(*img);
+    if (src_w <= 0 || src_h <= 0) {
+        fprintf(stderr, "[WARN] get_width/get_height invalid (%dx%d), fallback to img_shape\n", src_w, src_h);
+        src_w = img_shape[0];
+        src_h = img_shape[1];
+    }
+
+    if (src_w != img_shape[0] || src_h != img_shape[1]) {
+        fprintf(stderr, "[WARN] Input size mismatch: expected %dx%d, got %dx%d\n",
+            img_shape[0], img_shape[1], src_w, src_h);
+    }
+
+    // ---------- 准备 letterbox tensor ----------
     if (!g_lb_init) {
-        g_letterbox_tensor = create_tensor(640, 480, SSNE_Y_8, SSNE_BUF_AI);
-        uint8_t* lb_data = (uint8_t*)get_data(g_letterbox_tensor);
-        memset(lb_data, 0, 640 * 480);
+        g_letterbox_tensor = create_tensor(det_shape[0], det_shape[1], SSNE_Y_8, SSNE_BUF_AI);
         g_lb_init = true;
     }
-    uint8_t* sensor_data = (uint8_t*)get_data(*img);
     uint8_t* lb_data = (uint8_t*)get_data(g_letterbox_tensor);
-    
-    int target_w = 270;
-    int target_h = 480;
-    int pad_x = 185; // (640 - 270) / 2 = 185
-    
+    // 每次调用前清零整个 tensor，防止 padding 区域被上次推理残留污染
+    memset(lb_data, 0, det_shape[0] * det_shape[1]);
+
+    // ---------- 计算保持 aspect ratio 的 letterbox 参数 ----------
+    float scale_w = static_cast<float>(det_shape[0]) / src_w;
+    float scale_h = static_cast<float>(det_shape[1]) / src_h;
+    float scale = std::min(scale_w, scale_h);
+
+    int target_w = static_cast<int>(src_w * scale);
+    int target_h = static_cast<int>(src_h * scale);
+    int pad_x = (det_shape[0] - target_w) / 2;
+    int pad_y = (det_shape[1] - target_h) / 2;
+
+    // 保存供 Postprocess 做逆映射
+    g_letterbox_scale = scale;
+    g_letterbox_pad_x = static_cast<float>(pad_x);
+    g_letterbox_pad_y = static_cast<float>(pad_y);
+
+    // ---------- 浮点 nearest-neighbor resize ----------
+    // 核心修复：用浮点坐标 + round，彻底避免整数除法的 temporal aliasing
     for (int y = 0; y < target_h; y++) {
-        int src_y = y * 1280 / 480; 
-        uint8_t* dst_row = lb_data + (y * 640) + pad_x;
-        uint8_t* src_row = sensor_data + (src_y * 720);
-        
+        float src_y_f = (y + 0.5f) / scale - 0.5f;
+        int src_y = static_cast<int>(roundf(src_y_f));
+        src_y = std::max(0, std::min(src_y, src_h - 1));
+
+        uint8_t* dst_row = lb_data + ((y + pad_y) * det_shape[0]) + pad_x;
+        uint8_t* src_row = sensor_data + (src_y * src_w);  // 假设 stride == width
+
         for (int x = 0; x < target_w; x++) {
-            int src_x = x * 720 / 270;
+            float src_x_f = (x + 0.5f) / scale - 0.5f;
+            int src_x = static_cast<int>(roundf(src_x_f));
+            src_x = std::max(0, std::min(src_x, src_w - 1));
             dst_row[x] = src_row[src_x];
         }
     }
 
+    // ---------- 推理 ----------
     int ret = RunAiPreprocessPipe(pipe_offline, g_letterbox_tensor, inputs[0]);
-
     if (ret != 0) {
         result->Clear();
         return;
@@ -195,23 +256,24 @@ void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, f
         }
     }
 
+    // ---------- 解码 ----------
     std::vector<std::array<float, 4>> boxes;
     std::vector<float> scores;
     std::vector<int> class_ids;
-    int cls_80_idx = 0; int cls_40_idx = 1; int cls_20_idx = 2; 
-    int reg_80_idx = 3; int reg_40_idx = 4; int reg_20_idx = 5; 
+    int cls_80_idx = 0; int cls_40_idx = 1; int cls_20_idx = 2;
+    int reg_80_idx = 3; int reg_40_idx = 4; int reg_20_idx = 5;
 
     DecodeHeadOutputs((float*)get_data(outputs[cls_80_idx]), (float*)get_data(outputs[reg_80_idx]),
-                      get_height(outputs[cls_80_idx]), get_width(outputs[cls_80_idx]), 8,
-                      conf_threshold, boxes, scores, class_ids);
+        get_height(outputs[cls_80_idx]), get_width(outputs[cls_80_idx]), 8,
+        conf_threshold, boxes, scores, class_ids);
 
     DecodeHeadOutputs((float*)get_data(outputs[cls_40_idx]), (float*)get_data(outputs[reg_40_idx]),
-                      get_height(outputs[cls_40_idx]), get_width(outputs[cls_40_idx]), 16,
-                      conf_threshold, boxes, scores, class_ids);
+        get_height(outputs[cls_40_idx]), get_width(outputs[cls_40_idx]), 16,
+        conf_threshold, boxes, scores, class_ids);
 
     DecodeHeadOutputs((float*)get_data(outputs[cls_20_idx]), (float*)get_data(outputs[reg_20_idx]),
-                      get_height(outputs[cls_20_idx]), get_width(outputs[cls_20_idx]), 32,
-                      conf_threshold, boxes, scores, class_ids);
+        get_height(outputs[cls_20_idx]), get_width(outputs[cls_20_idx]), 32,
+        conf_threshold, boxes, scores, class_ids);
     Postprocess(&boxes, &scores, &class_ids, result);
 }
 
@@ -223,7 +285,7 @@ void YOLOV8_OBJECT::Release() {
     }
     // NOTE: outputs[i] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
     // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
-    for(int i=0; i<6; i++) {
+    for (int i = 0; i < 6; i++) {
         outputs[i].data = nullptr;
     }
     ReleaseAIPreprocessPipe(pipe_offline);

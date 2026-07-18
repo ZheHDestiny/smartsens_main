@@ -28,6 +28,7 @@ static bool g_focus_reset = false;
 static bool g_focus_enroll = false;
 static bool g_focus_clear_id = false;
 static std::mutex g_focus_mtx;
+static const size_t kMaxReIdTrackStates = 16;
 
 class FocusTimingWindow {
 public:
@@ -125,6 +126,19 @@ static void assign_reid_tracks(vector<EyePair>* pairs,
         [frame_count](const ReIdTrackState& state) {
             return frame_count - state.last_seen_frame > 45;
         }), tracks->end());
+    // A crowded/unstable scene can produce short-lived pair associations on
+    // every frame. Keep this history strictly bounded so ReID association
+    // work cannot grow with run time. Prefer retaining recently seen tracks,
+    // which also keeps an active lock intact.
+    while (tracks->size() > kMaxReIdTrackStates) {
+        size_t oldest = 0;
+        for (size_t i = 1; i < tracks->size(); ++i) {
+            if ((*tracks)[i].last_seen_frame < (*tracks)[oldest].last_seen_frame) {
+                oldest = i;
+            }
+        }
+        tracks->erase(tracks->begin() + oldest);
+    }
 }
 
 static int find_pair_by_track_id(const vector<EyePair>& pairs, uint64_t track_id) {
@@ -134,12 +148,19 @@ static int find_pair_by_track_id(const vector<EyePair>& pairs, uint64_t track_id
     return -1;
 }
 
+static bool is_eye_face_tracking_mode(FocusTrackingMode mode) {
+    return mode == FocusTrackingMode::NPU_MOBILENET ||
+           mode == FocusTrackingMode::NPU_FLASH;
+}
+
 static const char* focus_mode_name(FocusTrackingMode mode) {
     switch (mode) {
         case FocusTrackingMode::NO_NPU_TRACKER:
             return "MotionGuard CPU 多目标风险追焦";
         case FocusTrackingMode::NPU_MOBILENET:
             return "EyeDet-S + FaceID-S 智能追焦";
+        case FocusTrackingMode::NPU_FLASH:
+            return "EyeDet-Flash + FaceID-S 高帧率智能追焦";
         default:
             return "未知追焦模式";
     }
@@ -253,9 +274,10 @@ static void print_focus_mode_menu() {
     cout << "======================================================\n";
     cout << "  1. MotionGuard CPU场景守护 (居家守护/路侧监控)\n";
     cout << "  2. EyeDet-S + FaceID-S 智能追焦 (双眼检测 + 临时ID)\n";
+    cout << "  3. EyeDet-Flash + FaceID-S 高帧率追焦 (320x480 GRAY)\n";
     cout << "  0. 返回主菜单\n";
     cout << "======================================================\n";
-    cout << "请输入追焦子功能编号 (0-2) 并按回车: ";
+    cout << "请输入追焦子功能编号 (0-3) 并按回车: ";
 }
 
 static bool choose_focus_mode(FocusTrackingMode* mode) {
@@ -284,6 +306,10 @@ static bool choose_focus_mode(FocusTrackingMode* mode) {
         }
         if (choice == 2) {
             *mode = FocusTrackingMode::NPU_MOBILENET;
+            return true;
+        }
+        if (choice == 3) {
+            *mode = FocusTrackingMode::NPU_FLASH;
             return true;
         }
 
@@ -332,7 +358,7 @@ static void focus_keyboard_listener(FocusTrackingMode mode) {
     printf("[追焦键盘] ┌─────────────────────────────────┐\n");
     printf("[追焦键盘] │ P/p: 暂停/继续                  │\n");
     printf("[追焦键盘] │ R/r: 重置锁定目标                │\n");
-    if (mode == FocusTrackingMode::NPU_MOBILENET) {
+    if (is_eye_face_tracking_mode(mode)) {
         printf("[追焦键盘] │ E/e: 录入当前目标为 id_tmp       │\n");
         printf("[追焦键盘] │ C/c: 清除临时身份                 │\n");
     }
@@ -357,11 +383,11 @@ static void focus_keyboard_listener(FocusTrackingMode mode) {
                 g_focus_pause = false;
                 g_focus_reset = true;
             }
-            if (mode == FocusTrackingMode::NPU_MOBILENET &&
+            if (is_eye_face_tracking_mode(mode) &&
                 (input == "e" || input == "E")) {
                 g_focus_enroll = true;
             }
-            if (mode == FocusTrackingMode::NPU_MOBILENET &&
+            if (is_eye_face_tracking_mode(mode) &&
                 (input == "c" || input == "C")) {
                 g_focus_clear_id = true;
             }
@@ -458,7 +484,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     IMAGEPROCESSOR image_processor;
 
     bool ssne_ok = false;
-    if (selected_mode == FocusTrackingMode::NPU_MOBILENET) {
+    const bool flash_mode = selected_mode == FocusTrackingMode::NPU_FLASH;
+    const bool eye_face_mode = is_eye_face_tracking_mode(selected_mode);
+    if (eye_face_mode) {
         SigintBlocker blocker;
         if (ssne_initial() != 0) {
             fprintf(stderr, "[WARN] ssne_initial() failed!\n");
@@ -489,7 +517,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     tracker_config.template_update_threshold = 0.68f;
     tracker_config.min_focus_score_for_update = 3.0f;
     tracker_config.mode = selected_mode;
-    tracker_config.npu_model_path = "./app_assets/models/eyedet_s.m1model";
+    tracker_config.npu_model_path = flash_mode
+        ? "./app_assets/models/eyedet_flash.m1model"
+        : "./app_assets/models/eyedet_s.m1model";
     tracker_config.npu_interval_frames = 1;
 
     FocusTracker tracker;
@@ -514,14 +544,22 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     }
 
     EyeDetFaceIdEngine smart_engine;
-    if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+    if (eye_face_mode) {
+        EyeDetInputConfig eyedet_config;
+        if (flash_mode) {
+            // Model tensor is NCHW [1, 1, 320, 480]: width=480, height=320.
+            eyedet_config.width = 480;
+            eyedet_config.height = 320;
+            eyedet_config.gray = true;
+        }
         if (!ssne_ok || !smart_engine.Initialize(
-                "./app_assets/models/eyedet_s.m1model",
+                tracker_config.npu_model_path,
                 "./app_assets/models/faceid_s.m1model",
                 capture_w,
-                capture_h)) {
+                capture_h,
+                eyedet_config)) {
             fprintf(stderr,
-                    "[ERROR] EyeDet-S 初始化失败；模式2无法满足模型契约，返回子菜单。\n");
+                    "[ERROR] EyeDet 初始化失败；当前模式无法满足模型契约，返回子菜单。\n");
             smart_engine.Release();
             image_processor.Release();
             if (ssne_ok) {
@@ -545,7 +583,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     const std::array<float, 4> focus_fov = {
         static_cast<float>(crop_x1), static_cast<float>(crop_y1),
         static_cast<float>(crop_x2 - 1), static_cast<float>(crop_y2 - 1)};
-    if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+    if (eye_face_mode) {
         visualizer.DrawFocusFov(focus_fov);
         visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
         visualizer.DrawFocusConfidence(0.0f, 0.0f);
@@ -557,7 +595,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     printf("[配置] sensor=%dx%d crop=(%d,%d)-(%d,%d) capture=%dx%d proc=%dx%d\n",
            sensor_w, sensor_h, crop_x1, crop_y1, crop_x2, crop_y2, capture_w, capture_h, proc_w, proc_h);
     printf("[模式] %s\n", focus_mode_name(tracker_config.mode));
-    if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+    if (eye_face_mode) {
         printf("[处理] P/p暂停 | R/r重置 | E/e录入id_tmp | C/c清ID | Q/q返回\n\n");
     } else {
         printf("[处理] P/p暂停 | R/r重置背景与轨迹 | Q/q返回\n\n");
@@ -587,6 +625,11 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     uint32_t last_recover_successes = 0;
     bool last_osd_locked = false;
     bool last_osd_identity_matched = false;
+    // ReID can briefly lose/reacquire a track in a crowded frame.  Texture
+    // layer clear+upload is expensive on A1, so avoid repeatedly replacing
+    // the ID sprite faster than the display can usefully present it.
+    auto last_identity_osd_update = chrono::steady_clock::time_point::min();
+    const chrono::milliseconds kIdentityOsdMinUpdateInterval(250);
     bool last_enrollment_flash_visible = false;
     int enrollment_complete_flash_frames = 0;
     bool has_last_result_time = false;
@@ -605,7 +648,13 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     FocusTimingWindow osd_ms;
 
     const uint32_t tracker_refresh_interval = 5;
-    const uint32_t osd_refresh_interval = 3;
+    // Both NPU eye/identity modes keep OSD and FaceID-S below the detector
+    // cadence. EyeDet still runs every frame; once a ReID lock exists, the
+    // tracker and its last confirmed identity remain valid between samples.
+    // Keep the CPU-only MotionGuard cadence unchanged from origin/main.
+    const uint32_t osd_refresh_interval = eye_face_mode ? 6 : 3;
+    const uint32_t reid_faceid_interval = eye_face_mode ? 2 : 1;
+    const uint32_t idle_faceid_interval = flash_mode ? 8 : 6;
 
     {
         SigintBlocker blocker;
@@ -646,7 +695,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                     visualizer.DrawFocusEyes(empty_result, false, crop_x1, crop_y1);
                     last_osd_locked = false;
                 }
-                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                if (eye_face_mode) {
                     visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
                 }
                 if (RuntimeLogEnabled()) {
@@ -694,7 +743,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 reid_locked_missing_frames = 0;
                 reid_display_similarity = 0.0f;
                 last_osd_identity_matched = false;
-                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                if (eye_face_mode) {
                     visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
                 }
                 printf("[追焦] 已重置锁定目标，下一帧重新选择。\n");
@@ -705,12 +754,18 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 identity_result.Clear();
                 identity_track_id = 0;
                 last_osd_identity_matched = false;
-                reid_tracks.clear();
+                vector<ReIdTrackState>().swap(reid_tracks);
                 reid_locked_track_id = 0;
                 reid_locked_missing_frames = 0;
                 reid_display_similarity = 0.0f;
-                if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+                reid_round_robin = 0;
+                next_reid_track_id = 1;
+                enrollment_complete_flash_frames = 0;
+                last_enrollment_flash_visible = false;
+                if (eye_face_mode) {
+                    visualizer.DrawFocusEnrollmentFlash(focus_fov, false);
                     visualizer.DrawFocusIdentity(false, crop_x2 - 1, crop_y1);
+                    last_identity_osd_update = chrono::steady_clock::now();
                 }
                 printf("[FACEID] 已清除 id_tmp、录入样本和身份显示。\n");
             }
@@ -718,7 +773,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             frame_count++;
 
             bool locked = false;
-            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+            if (eye_face_mode) {
                 const bool det_ok = smart_engine.DetectEyes(&curr_frame, &eye_result);
                 if (det_ok) {
                     preprocess_ms.Add(eye_result.preprocess_ms);
@@ -729,7 +784,10 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 if (det_ok && reid_mode) {
                     assign_reid_tracks(&eye_result.pairs, &reid_tracks,
                                        &next_reid_track_id, frame_count);
-                    if (!eye_result.pairs.empty()) {
+                    const bool should_run_reid = !eye_result.pairs.empty() &&
+                        (reid_locked_track_id == 0 ||
+                         frame_count % reid_faceid_interval == 0);
+                    if (should_run_reid) {
                         const size_t reid_index = reid_round_robin % eye_result.pairs.size();
                         ++reid_round_robin;
                         EyePair& reid_pair = eye_result.pairs[reid_index];
@@ -745,7 +803,11 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                                     : 0.65f * state->similarity + 0.35f * reid_result.similarity;
                                 state->last_eval_frame = frame_count;
                                 if (state->similarity >= 0.75f) {
-                                    ++state->stable_hits;
+                                    // Two hits are enough to confirm a lock.
+                                    // Do not let this counter grow forever in
+                                    // a long-running session.
+                                    state->stable_hits = std::min(
+                                        state->stable_hits + 1, 3);
                                 } else {
                                     state->stable_hits = 0;
                                 }
@@ -785,6 +847,13 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                         } else {
                             printf("[REID] lock expired track=%llu\n",
                                    static_cast<unsigned long long>(reid_locked_track_id));
+                            ReIdTrackState* expired = find_reid_track(
+                                &reid_tracks, reid_locked_track_id);
+                            if (expired != nullptr) {
+                                expired->stable_hits = 0;
+                                expired->similarity = 0.0f;
+                                expired->last_eval_frame = 0;
+                            }
                             reid_locked_track_id = 0;
                             reid_display_similarity = 0.0f;
                         }
@@ -833,7 +902,9 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                         identity_track_id = 0;
                     }
                     if (!reid_mode &&
-                        (frame_count == 1 || frame_count % 6 == 0 || smart_engine.IsEnrolling())) {
+                        (frame_count == 1 ||
+                         frame_count % idle_faceid_interval == 0 ||
+                         smart_engine.IsEnrolling())) {
                         IdentityResult next_identity;
                         const int samples_before = smart_engine.EnrollmentCount();
                         const auto face_begin = chrono::steady_clock::now();
@@ -868,8 +939,20 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                     if (!smart_engine.BeginEnroll()) {
                         printf("[FACEID] 无稳定双眼目标或 FaceID 不可用，无法开始录入。\n");
                     } else {
+                        // A new prototype must never inherit association
+                        // confidence accumulated for the previous identity.
+                        vector<ReIdTrackState>().swap(reid_tracks);
+                        reid_locked_track_id = 0;
+                        reid_locked_missing_frames = 0;
+                        reid_display_similarity = 0.0f;
+                        reid_round_robin = 0;
+                        next_reid_track_id = 1;
                         identity_result.Clear();
                         identity_track_id = smart_engine.SelectedTrackId();
+                        last_osd_identity_matched = false;
+                        visualizer.DrawFocusIdentity(false,
+                                                     crop_x2 - 1, crop_y1);
+                        last_identity_osd_update = chrono::steady_clock::now();
                     }
                 }
                 if (!reid_mode) {
@@ -953,7 +1036,7 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
             if (locked) locked_count++;
 
             const auto osd_begin = chrono::steady_clock::now();
-            if (tracker_config.mode == FocusTrackingMode::NPU_MOBILENET) {
+            if (eye_face_mode) {
                 const bool enrollment_flash_visible = enrollment_sample_accepted ||
                     enrollment_complete_flash_frames > 0;
                 if (enrollment_flash_visible != last_enrollment_flash_visible) {
@@ -967,10 +1050,15 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
                 const bool identity_matched = reid_mode
                     ? reid_locked_track_id != 0
                     : (identity_result.valid && !identity_result.expired);
-                if (identity_matched != last_osd_identity_matched) {
+                const auto identity_osd_now = chrono::steady_clock::now();
+                if (identity_matched != last_osd_identity_matched &&
+                    (last_identity_osd_update == chrono::steady_clock::time_point::min() ||
+                     identity_osd_now - last_identity_osd_update >=
+                         kIdentityOsdMinUpdateInterval)) {
                     visualizer.DrawFocusIdentity(identity_matched,
                                                  crop_x2 - 1, crop_y1);
                     last_osd_identity_matched = identity_matched;
+                    last_identity_osd_update = identity_osd_now;
                 }
                 if (frame_count == 1 || frame_count % osd_refresh_interval == 0) {
                     visualizer.DrawFocusEyes(eye_result, identity_matched,

@@ -1,0 +1,232 @@
+<svg viewBox="0 0 1000 1700" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L0,8 L10,4 z" fill="#424242"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="2" dy="3" stdDeviation="2" flood-color="#000000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="1000" height="1700" fill="#FFFFFF"/>
+
+  <!-- 标题 -->
+  <text x="500" y="45" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="22" font-weight="bold" fill="#1a1a1a">SSNE AI Demo 项目整体流程图</text>
+  <line x1="200" y1="58" x2="800" y2="58" stroke="#BDBDBD" stroke-width="1"/>
+
+  <!-- 阶段标签 -->
+  <text x="80" y="110" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="13" font-weight="bold" fill="#1565C0" transform="rotate(-90,80,110)">构建阶段</text>
+  <text x="80" y="520" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="13" font-weight="bold" fill="#EF6C00" transform="rotate(-90,80,520)">运行阶段</text>
+  <text x="80" y="1120" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="13" font-weight="bold" fill="#2E7D32" transform="rotate(-90,80,1120)">输出与控制</text>
+
+  <!-- 分隔线 -->
+  <line x1="130" y1="80" x2="130" y2="1620" stroke="#E0E0E0" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="130" y1="320" x2="1000" y2="320" stroke="#E0E0E0" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="130" y1="980" x2="1000" y2="980" stroke="#E0E0E0" stroke-width="1" stroke-dasharray="5,5"/>
+
+  <!-- 1. 开始 -->
+  <rect x="400" y="90" width="200" height="46" rx="23" ry="23" fill="#FFEBEE" stroke="#C62828" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="118" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">开始 (Start)</text>
+
+  <line x1="500" y1="136" x2="500" y2="162" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 2. 工程构建 -->
+  <rect x="320" y="162" width="360" height="56" rx="4" ry="4" fill="#E3F2FD" stroke="#1565C0" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="188" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">工程交叉编译 (CMake Build)</text>
+  <text x="500" y="208" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">Buildroot / toolchain / aarch64-linux-gnueabihf</text>
+
+  <line x1="500" y1="218" x2="500" y2="244" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 3. 板级部署 -->
+  <rect x="320" y="244" width="360" height="56" rx="4" ry="4" fill="#E3F2FD" stroke="#1565C0" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="270" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">板级部署与烧录 (Deploy)</text>
+  <text x="500" y="290" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">SCP / TFTP / SD-Card 镜像烧写</text>
+
+  <line x1="500" y1="300" x2="500" y2="326" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 4. 系统初始化 -->
+  <rect x="320" y="340" width="360" height="56" rx="4" ry="4" fill="#FFF3E0" stroke="#EF6C00" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="366" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">系统初始化 (System Init)</text>
+  <text x="500" y="386" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">Camera MIPI / OSD / NPU Model Load</text>
+
+  <line x1="500" y1="396" x2="500" y2="422" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 5. 主控菜单 -->
+  <rect x="320" y="422" width="360" height="56" rx="4" ry="4" fill="#F3E5F5" stroke="#6A1B9A" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="448" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">主控交互菜单 (Main Menu)</text>
+  <text x="500" y="468" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">main.cpp 多线程键盘监听循环</text>
+
+  <line x1="500" y1="478" x2="500" y2="504" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 6. 用户输入决策 -->
+  <polygon points="500,504 600,552 500,600 400,552" fill="#FFFDE7" stroke="#F9A825" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="548" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="13" fill="#212121">用户输入选择</text>
+  <text x="500" y="564" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">Keyboard Input (1~7 / q)</text>
+
+  <!-- 分支到7个模块 -->
+  <line x1="500" y1="600" x2="500" y2="620" stroke="#424242" stroke-width="1.5"/>
+  <line x1="230" y1="620" x2="710" y2="620" stroke="#424242" stroke-width="1.5"/>
+
+  <!-- 模块1: 人脸检测 -->
+  <line x1="230" y1="620" x2="230" y2="642" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="160" y="642" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="230" y="665" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">人脸检测</text>
+  <text x="230" y="680" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Face Detection</text>
+
+  <!-- 模块2: 表情识别 -->
+  <line x1="390" y1="620" x2="390" y2="642" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="320" y="642" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="390" y="665" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">表情识别</text>
+  <text x="390" y="680" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Facial Expr.</text>
+
+  <!-- 模块3: 手势检测 -->
+  <line x1="550" y1="620" x2="550" y2="642" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="480" y="642" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="550" y="665" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">手势检测</text>
+  <text x="550" y="680" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Gesture Det.</text>
+
+  <!-- 模块4: 目标检测 -->
+  <line x1="710" y1="620" x2="710" y2="642" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="640" y="642" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="710" y="665" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">目标检测</text>
+  <text x="710" y="680" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Object Det.</text>
+
+  <!-- 上排模块垂线（贯穿至汇合线 y=800，与下排分支水平线在 y=710 相交） -->
+  <line x1="230" y1="690" x2="230" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="390" y1="690" x2="390" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="550" y1="690" x2="550" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="710" y1="690" x2="710" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <!-- 下排分支水平线 -->
+  <line x1="230" y1="710" x2="710" y2="710" stroke="#424242" stroke-width="1.5"/>
+
+  <!-- 模块5: 光流调试 -->
+  <line x1="310" y1="710" x2="310" y2="732" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="240" y="732" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="310" y="755" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">光流调试</text>
+  <text x="310" y="770" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Optical Flow</text>
+
+  <!-- 模块6: RPS -->
+  <line x1="470" y1="710" x2="470" y2="732" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="400" y="732" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="470" y="755" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">RPS 测试</text>
+  <text x="470" y="770" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Rock-Paper-Scissors</text>
+
+  <!-- 模块7: 速度检测 -->
+  <line x1="630" y1="710" x2="630" y2="732" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="560" y="732" width="140" height="48" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="630" y="755" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">速度检测</text>
+  <text x="630" y="770" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Speed Det.</text>
+
+  <!-- 下排模块底部垂直到汇合线 -->
+  <line x1="310" y1="780" x2="310" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="470" y1="780" x2="470" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="630" y1="780" x2="630" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <!-- 汇合水平线与中心箭头 -->
+  <line x1="230" y1="800" x2="710" y2="800" stroke="#424242" stroke-width="1.5"/>
+  <line x1="500" y1="800" x2="500" y2="822" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 7. 通用推理 Pipeline -->
+  <rect x="260" y="822" width="480" height="46" rx="4" ry="4" fill="#E1F5FE" stroke="#0277BD" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="850" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">统一推理与处理 Pipeline</text>
+
+  <line x1="500" y1="868" x2="500" y2="890" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 子流程：图像采集 -->
+  <rect x="350" y="890" width="300" height="44" rx="4" ry="4" fill="#FFFFFF" stroke="#0277BD" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="500" y="910" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">① 图像采集 (MIPI / V4L2)</text>
+  <text x="500" y="925" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">720×1280 RAW / YUV 帧获取</text>
+
+  <line x1="500" y1="934" x2="500" y2="956" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 子流程：预处理 -->
+  <rect x="350" y="956" width="300" height="44" rx="4" ry="4" fill="#FFFFFF" stroke="#0277BD" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="500" y="976" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">② 预处理与 ROI 裁剪</text>
+  <text x="500" y="991" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">Resize / CLAHE / Pad / Undistort</text>
+
+  <line x1="500" y1="1000" x2="500" y2="1022" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 子流程：模型推理 -->
+  <rect x="350" y="1022" width="300" height="44" rx="4" ry="4" fill="#FFFFFF" stroke="#0277BD" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="500" y="1042" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">③ SSNE NPU 模型推理</text>
+  <text x="500" y="1057" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">.m1model 加载与前向传播</text>
+
+  <line x1="500" y1="1066" x2="500" y2="1088" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 子流程：后处理 -->
+  <rect x="350" y="1088" width="300" height="44" rx="4" ry="4" fill="#FFFFFF" stroke="#0277BD" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="500" y="1108" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">④ 后处理解析 (Post-process)</text>
+  <text x="500" y="1123" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">NMS / 坐标映射 / 状态机 / TTC</text>
+
+  <line x1="500" y1="1132" x2="500" y2="1154" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 输出层 -->
+  <line x1="500" y1="1154" x2="500" y2="1170" stroke="#424242" stroke-width="1.5"/>
+  <line x1="320" y1="1170" x2="680" y2="1170" stroke="#424242" stroke-width="1.5"/>
+
+  <!-- OSD -->
+  <line x1="320" y1="1170" x2="320" y2="1192" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="230" y="1192" width="180" height="50" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="320" y="1215" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">OSD 可视化渲染</text>
+  <text x="320" y="1232" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">BoundingBox / Icon / Bitmap</text>
+
+  <!-- 串口 -->
+  <line x1="680" y1="1170" x2="680" y2="1192" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="590" y="1192" width="180" height="50" rx="4" ry="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="2" filter="url(#shadow)"/>
+  <text x="680" y="1215" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#212121">串口终端输出</text>
+  <text x="680" y="1232" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#616161">UART Log / FPS / Confidence</text>
+
+  <!-- 汇合到返回判断 -->
+  <line x1="320" y1="1242" x2="320" y2="1262" stroke="#424242" stroke-width="1.5"/>
+  <line x1="680" y1="1242" x2="680" y2="1262" stroke="#424242" stroke-width="1.5"/>
+  <line x1="320" y1="1262" x2="680" y2="1262" stroke="#424242" stroke-width="1.5"/>
+  <line x1="500" y1="1262" x2="500" y2="1284" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 返回判断 -->
+  <polygon points="500,1284 600,1332 500,1380 400,1332" fill="#FFFDE7" stroke="#F9A825" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="1328" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="13" fill="#212121">继续运行?</text>
+  <text x="500" y="1344" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#616161">q/Q 退出 / 其他继续</text>
+
+  <!-- 是：返回主菜单 -->
+  <line x1="400" y1="1332" x2="150" y2="1332" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="150" y1="1332" x2="150" y2="450" stroke="#424242" stroke-width="1.5"/>
+  <line x1="150" y1="450" x2="320" y2="450" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="275" y="1320" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#2E7D32" font-weight="bold">是 (Continue)</text>
+
+  <!-- 否：结束 -->
+  <line x1="500" y1="1380" x2="500" y2="1410" stroke="#424242" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="530" y="1400" text-anchor="start" font-family="Times New Roman, SimSun, serif" font-size="12" fill="#C62828" font-weight="bold">否 (Exit)</text>
+
+  <rect x="400" y="1410" width="200" height="46" rx="23" ry="23" fill="#FFEBEE" stroke="#C62828" stroke-width="2" filter="url(#shadow)"/>
+  <text x="500" y="1438" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="14" fill="#212121">结束 (End)</text>
+
+  <!-- 图例 -->
+  <rect x="750" y="90" width="220" height="210" rx="4" ry="4" fill="#FAFAFA" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="760" y="115" font-family="Times New Roman, SimSun, serif" font-size="13" font-weight="bold" fill="#424242">图例 (Legend)</text>
+
+  <rect x="770" y="130" width="20" height="14" rx="7" ry="7" fill="#FFEBEE" stroke="#C62828" stroke-width="1.5"/>
+  <text x="800" y="142" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">开始 / 结束</text>
+
+  <rect x="770" y="155" width="20" height="14" rx="2" ry="2" fill="#E3F2FD" stroke="#1565C0" stroke-width="1.5"/>
+  <text x="800" y="167" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">构建与部署</text>
+
+  <rect x="770" y="180" width="20" height="14" rx="2" ry="2" fill="#FFF3E0" stroke="#EF6C00" stroke-width="1.5"/>
+  <text x="800" y="192" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">系统初始化</text>
+
+  <rect x="770" y="205" width="20" height="14" rx="2" ry="2" fill="#F3E5F5" stroke="#6A1B9A" stroke-width="1.5"/>
+  <text x="800" y="217" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">交互控制</text>
+
+  <rect x="770" y="230" width="20" height="14" rx="2" ry="2" fill="#E8F5E9" stroke="#2E7D32" stroke-width="1.5"/>
+  <text x="800" y="242" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">应用 / 输出模块</text>
+
+  <polygon points="770,260 780,254 790,260 780,266" fill="#FFFDE7" stroke="#F9A825" stroke-width="1.5"/>
+  <text x="810" y="264" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">判断 / 决策</text>
+
+  <rect x="770" y="275" width="20" height="14" rx="2" ry="2" fill="#FFFFFF" stroke="#0277BD" stroke-width="1.5"/>
+  <text x="800" y="287" font-family="Times New Roman, SimSun, serif" font-size="11" fill="#424242">子处理流程</text>
+
+  <!-- 规范说明 -->
+  <text x="500" y="1520" text-anchor="middle" font-family="Times New Roman, SimSun, serif" font-size="10" fill="#9E9E9E">
+    注：本流程图遵循 ISO 5807 / ANSI 流程图符号规范，采用学术标准配色与无衬线/衬线混排字体
+  </text>
+</svg>

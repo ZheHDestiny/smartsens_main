@@ -317,6 +317,7 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
     enabled_ = osd_device.IsEnabled();
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
+    focus_face_icon_drawn_ = false;
     
     if (!enabled_) {
         std::cerr << "[VISUALIZER] Warning: OSD device not enabled or initialization failed." << std::endl;
@@ -328,6 +329,7 @@ void VISUALIZER::Release() {
     enabled_ = false;
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
+    focus_face_icon_drawn_ = false;
 }
 
 void VISUALIZER::Clear() {
@@ -339,6 +341,7 @@ void VISUALIZER::Clear() {
     osd_device.Draw(empty, LAYER_SAFEDIR);
     osd_device.Draw(empty, LAYER_MASK);
     osd_device.ClearLayer(LAYER_FACE_ICON);
+    focus_face_icon_drawn_ = false;
 }
 
 void VISUALIZER::Draw() {
@@ -486,34 +489,47 @@ void VISUALIZER::DrawFocusEyes(const EyeDetResult& result,
         selected = &result.pairs[result.selected_index];
     }
 
-    for (size_t i = 0; i < result.eyes.size(); ++i) {
-        const EyeBox& eye = result.eyes[i];
-        const bool selected_eye = selected != nullptr &&
-            (same_eye_box(eye, selected->left) || same_eye_box(eye, selected->right));
-        OsdQR q;
-        q.box = {eye.x1 + offset_x, eye.y1 + offset_y,
-                 eye.x2 + offset_x, eye.y2 + offset_y};
-        q.layer_id = DETECTION_LAYER_ID;
-        q.type = fdevice::TYPE_HOLLOW;
-        if (!selected_eye) {
-            q.border = 2;
-            q.color = 29;
-            q.alpha = fdevice::TYPE_ALPHA50;
-        } else if (identity_matched) {
-            q.border = 5;
-            q.color = 4;
-            q.alpha = fdevice::TYPE_ALPHA100;
-        } else {
-            q.border = 4;
-            q.color = 23;
-            q.alpha = fdevice::TYPE_ALPHA75;
+    // The A1 OSD supports at most four quadrangles on a layer scanline.
+    // Render the selected pair first, then at most two supplementary eyes.
+    // This bounds command/DMA use even when a crowded scene produces many
+    // detector candidates.
+    const size_t kMaxFocusEyeQuads = 4;
+    for (int pass = 0; pass < 2 && quads.size() < kMaxFocusEyeQuads; ++pass) {
+        const bool want_selected = pass == 0;
+        for (size_t i = 0; i < result.eyes.size() && quads.size() < kMaxFocusEyeQuads; ++i) {
+            const EyeBox& eye = result.eyes[i];
+            const bool selected_eye = selected != nullptr &&
+                (same_eye_box(eye, selected->left) || same_eye_box(eye, selected->right));
+            if (selected_eye != want_selected) continue;
+
+            OsdQR q;
+            q.box = {eye.x1 + offset_x, eye.y1 + offset_y,
+                     eye.x2 + offset_x, eye.y2 + offset_y};
+            q.layer_id = DETECTION_LAYER_ID;
+            q.type = fdevice::TYPE_HOLLOW;
+            if (!selected_eye) {
+                q.border = 2;
+                q.color = 29;
+                q.alpha = fdevice::TYPE_ALPHA50;
+            } else if (identity_matched) {
+                q.border = 5;
+                q.color = 4;
+                q.alpha = fdevice::TYPE_ALPHA100;
+            } else {
+                q.border = 4;
+                q.color = 23;
+                q.alpha = fdevice::TYPE_ALPHA75;
+            }
+            quads.push_back(q);
         }
-        quads.push_back(q);
     }
-    if (!quads.empty()) {
-        std::vector<OsdQR> empty;
-        osd_device.Draw(empty, DETECTION_LAYER_ID);
-    }
+    // A1's layer flush submits new primitives but is not a guaranteed
+    // replacement for primitives submitted by a previous frame.  Clearing
+    // this layer first is therefore required: without it old eye boxes can
+    // accumulate in the driver, causing residual boxes and eventually an OSD
+    // command/DMA stall during a long-running tracking session.
+    std::vector<OsdQR> empty;
+    osd_device.Draw(empty, DETECTION_LAYER_ID);
     osd_device.Draw(quads, DETECTION_LAYER_ID);
 }
 
@@ -527,12 +543,13 @@ void VISUALIZER::DrawFocusIdentity(bool identity_matched,
     osd_device.DrawTexture(bitmap, nullptr, LAYER_BITMAP,
                            fov_right - 204, fov_top + 4,
                            fdevice::TYPE_ALPHA100);
-    const char* face = focus_face_bitmap();
+    const char* face = focus_face_icon_drawn_ ? nullptr : focus_face_bitmap();
     if (face != nullptr) {
         osd_device.ClearLayer(LAYER_FACE_ICON);
         osd_device.DrawTexture(face, nullptr, LAYER_FACE_ICON,
                                11, std::max(4, m_height - 24),
                                fdevice::TYPE_ALPHA100);
+        focus_face_icon_drawn_ = true;
     }
 }
 
@@ -577,6 +594,10 @@ void VISUALIZER::DrawFocusConfidence(float eye_confidence,
             bar_x1 + 3 + std::max(1, static_cast<int>((bar_x2 - bar_x1 - 6) * identity)),
             second_y + bar_h - 3, fdevice::TYPE_SOLID, 0);
     }
+    // See DrawFocusEyes(): clear the dynamic layer before each replacement.
+    // The calls are adjacent in the same processing thread; the OSD refresh
+    // is already rate-limited by the focus module, so this prevents stale
+    // bars without materially increasing display flicker.
     std::vector<OsdQR> empty;
     osd_device.Draw(empty, LAYER_SAFEDIR);
     osd_device.Draw(quads, LAYER_SAFEDIR);
@@ -596,6 +617,12 @@ void VISUALIZER::DrawFocusEnrollmentFlash(const std::array<float, 4>& fov,
         flash.color = 4;  // white, visible even when RGB output is unavailable
         quads.push_back(flash);
     }
+    // This layer is stateful in the A1 OSD driver. Replace the previous
+    // enrollment pulse explicitly so repeated E/C cycles cannot accumulate
+    // full-frame mask primitives.
+    std::vector<OsdQR> empty;
+    osd_device.Draw(empty, LAYER_MASK);
+    if (quads.empty()) return;
     osd_device.Draw(quads, LAYER_MASK);
 }
 

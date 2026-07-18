@@ -91,7 +91,11 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
         osd_alloc_buffer(m_osd_handle, m_layer_dma[layer_index].dma_2, dma_size);
         int dma_fd = osd_get_buffer_fd(m_osd_handle, m_layer_dma[layer_index].dma);
 
-        LAYER_ATTR_S osd_layer;
+        // osd_create_layer() requires every member to be initialized.  In
+        // particular, sensor_flag and the inactive encoder descriptor must
+        // never contain stack garbage: the OSD driver keeps this descriptor
+        // for the complete layer lifetime.
+        LAYER_ATTR_S osd_layer = {};
         
         if (is_image_layer) {
             osd_layer.codeTYPE = SS_TYPE_RLE;

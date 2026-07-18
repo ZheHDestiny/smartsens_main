@@ -86,6 +86,7 @@ private:
     int last_motion_system_state_ = -1;
     int last_optical_priority_ = -1;
     int last_optical_region_ = -1;
+    bool focus_face_icon_drawn_ = false;
 
     static const int LAYER_FEATURES  = 0;
     static const int LAYER_OBSTACLES = 1;

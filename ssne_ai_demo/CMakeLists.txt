@@ -17,6 +17,7 @@ include_directories(${M1_SDK_INC_DIR}/smartsoc)
 
 # 添加我们抽离出来的公共组件头文件目录
 include_directories(${CMAKE_SOURCE_DIR}/common/include)
+include_directories(${CMAKE_SOURCE_DIR}/modules/arduino_bridge)
 
 # ==========================================
 # 收集源文件
@@ -32,6 +33,7 @@ file(GLOB BUSINESS_SRC
     "${CMAKE_SOURCE_DIR}/modules/object_detection/src/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/optical_flow_debug/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/optical_flow_debug/src/*.cpp"
+    "${CMAKE_SOURCE_DIR}/modules/arduino_bridge/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/rps_detection/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/rps_detection/src/*.cpp"
     "${CMAKE_SOURCE_DIR}/modules/speed_detection/*.cpp"

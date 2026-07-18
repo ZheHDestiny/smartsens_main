@@ -14,10 +14,12 @@
 #include <vector>
 #include <sys/stat.h>
 #include <fstream>
+#include <limits>
 #include <string>
 
 #include "common.hpp"
 #include "utils.hpp"
+#include "arduino_bridge.hpp"
 
 using namespace std;
 
@@ -111,6 +113,40 @@ static const char* optical_state_name(int priority) {
     }
 }
 
+enum class OpticalFlowOutputMode {
+    LOCAL_ONLY = 1,
+    ARDUINO_RELAY = 2
+};
+
+static OpticalFlowOutputMode choose_optical_flow_output_mode() {
+    while (!g_signal_received.load()) {
+        int choice = 0;
+        printf("\n");
+        printf("═══════════════════════════════════════════════════════════\n");
+        printf("     光流避障输出模式\n");
+        printf("═══════════════════════════════════════════════════════════\n");
+        printf("  1. 标准模式：仅运行原光流避障，不启用 Arduino 通信\n");
+        printf("  2. Arduino 模式：通过电脑中继驱动三色指示灯\n");
+        printf("───────────────────────────────────────────────────────────\n");
+        printf("请选择输出模式 (1-2) 并按回车: ");
+
+        std::cin >> choice;
+        if (std::cin.fail()) {
+            std::cin.clear();
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            printf("\n[错误] 输入无效，请输入数字 1 或 2。\n");
+            continue;
+        }
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+        if (choice == 1) return OpticalFlowOutputMode::LOCAL_ONLY;
+        if (choice == 2) return OpticalFlowOutputMode::ARDUINO_RELAY;
+        printf("\n[提示] 无效的输出模式选项 (%d)，请重新选择。\n", choice);
+    }
+
+    return OpticalFlowOutputMode::LOCAL_ONLY;
+}
+
 /**
  * @brief 光流演示程序主函数
  * 【适配修改】：将 main() 改为 run_optical_flow_debug() 供顶级 main.cpp 调用
@@ -129,6 +165,23 @@ int run_optical_flow_debug() {
     printf("     SmartSens 光流障碍物避障系统\n");
     printf("     Optical Flow Obstacle Avoidance\n");
     printf("═══════════════════════════════════════════════════════════\n\n");
+
+    const OpticalFlowOutputMode output_mode = choose_optical_flow_output_mode();
+    if (g_signal_received.load()) return 0;
+    const bool arduino_enabled = output_mode == OpticalFlowOutputMode::ARDUINO_RELAY;
+    if (arduino_enabled) {
+        // uart0 is also the Type-C debug console. The Windows relay filters
+        // @OF packets from ttyS0 and forwards them to the Arduino USB port.
+        if (setenv("A1_ARDUINO_PORT", "/dev/ttyS0", 1) != 0) {
+            std::perror("[Arduino] 无法设置 A1_ARDUINO_PORT");
+            return -1;
+        }
+        printf("[输出模式] Arduino 电脑中继模式\n");
+        printf("  • 已在程序内设置 A1_ARDUINO_PORT=/dev/ttyS0\n");
+        printf("  • 请保持 Windows 中继脚本运行并占用 A1/Arduino 两个串口\n\n");
+    } else {
+        printf("[输出模式] 标准光流模式（不打开 Arduino 串口）\n\n");
+    }
     
     int img_width = 720;    
     int img_height = 1280;  
@@ -148,6 +201,17 @@ int run_optical_flow_debug() {
         } else {
             ssne_ok = true;
         }
+
+        // A host UVC viewer or an abruptly terminated demo can leave the
+        // sensor's pipe0 open below IMAGEPROCESSOR's per-object state.  A new
+        // IMAGEPROCESSOR therefore cannot know that it must close it first,
+        // and GetImageData() may wait forever for the first frame.  The
+        // original standalone optical-flow demo also closes pipe0
+        // unconditionally in Release(), so doing the same once here is the
+        // narrow, safe way to start this module from a known state.
+        printf("[图像] 启动前清理 pipe0 残留状态...\n");
+        CloseOnlinePipeline(kPipeline0);
+        usleep(60000);
     }
 
     image_processor.Initialize(&img_shape, 0, 720, 370, 910, 720, 540);
@@ -190,6 +254,8 @@ int run_optical_flow_debug() {
 
     vector<FeaturePoint> features;
     ObstacleInfo obstacle_info;
+    ArduinoBridge arduino_bridge;
+    if (arduino_enabled) arduino_bridge.Start();
 
     ssne_tensor_t curr_frame;
     memset(&curr_frame, 0, sizeof(ssne_tensor_t));
@@ -294,6 +360,9 @@ int run_optical_flow_debug() {
             }
 
             obstacle_detector.DetectObstacles(features, obstacle_info);
+            if (arduino_enabled) {
+                arduino_bridge.Update(MakeArduinoFeedback(obstacle_info));
+            }
 
             int curr_priority = obstacle_info.priority;
             int curr_region = obstacle_info.most_dangerous_region;
@@ -392,6 +461,13 @@ int run_optical_flow_debug() {
 
     if (listener_thread.joinable()) {
         listener_thread.join();
+    }
+
+    // Tell the external controller to enter its fail-safe state before the
+    // image pipeline and serial port are released.
+    if (arduino_enabled) {
+        arduino_bridge.SendStop();
+        arduino_bridge.Close();
     }
     
     optical_flow.Release();

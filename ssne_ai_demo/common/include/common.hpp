@@ -403,7 +403,8 @@ private:
 
 enum class FocusTrackingMode : int {
     NO_NPU_TRACKER = 0,
-    NPU_MOBILENET = 1
+    NPU_MOBILENET = 1,
+    NPU_FLASH = 2
 };
 
 struct FocusTrackingConfig {
@@ -559,6 +560,14 @@ struct IdentityResult {
     void Clear() { *this = IdentityResult(); }
 };
 
+// EyeDet model contract.  The original EyeDet-S is RGB 640x640; the Flash
+// PTQ model is GRAY 480x320 (W x H), with direct uint8 pixels in [0,255].
+struct EyeDetInputConfig {
+    int width = 640;
+    int height = 640;
+    bool gray = false;
+};
+
 class EyeDetFaceIdEngine {
 public:
     EyeDetFaceIdEngine();
@@ -567,7 +576,8 @@ public:
     bool Initialize(const std::string& eyedet_path,
                     const std::string& faceid_path,
                     int capture_w,
-                    int capture_h);
+                    int capture_h,
+                    const EyeDetInputConfig& eyedet_config = EyeDetInputConfig());
     bool DetectEyes(ssne_tensor_t* capture_y8, EyeDetResult* out);
     bool Identify(const uint8_t* capture_y8,
                   int width,
@@ -588,7 +598,6 @@ public:
     uint64_t SelectedTrackId() const { return selected_track_id_; }
 
 private:
-    static const int kDetSize = 640;
     static const int kFaceSize = 112;
     static const int kEmbeddingSize = 128;
 
@@ -611,6 +620,9 @@ private:
     bool face_contract_logged_ = false;
     int capture_w_ = 0;
     int capture_h_ = 0;
+    int det_input_w_ = 640;
+    int det_input_h_ = 640;
+    bool det_input_gray_ = false;
     float letterbox_scale_ = 1.0f;
     int letterbox_w_ = 0;
     int letterbox_h_ = 0;
@@ -620,6 +632,16 @@ private:
     std::vector<int> resize_y1_;
     std::vector<uint16_t> resize_wx_;
     std::vector<uint16_t> resize_wy_;
+
+    // Per-frame postprocess scratch. Keep these buffers for the lifetime of
+    // the engine: noisy scenes can produce thousands of raw candidates, and
+    // allocating/freeing those arrays every frame fragments the small ARM
+    // userspace heap during long-running operation.
+    size_t det_candidate_limit_ = 0;
+    std::vector<EyeBox> det_candidates_;
+    std::vector<int> nms_order_;
+    std::vector<int> nms_keep_;
+    std::vector<EyePair> pair_candidates_;
 
     bool selected_valid_ = false;
     uint64_t selected_track_id_ = 0;
@@ -650,8 +672,8 @@ private:
                     std::vector<EyeBox>* candidates,
                     float* max_class_score) const;
     void NmsAndMap(const std::vector<EyeBox>& candidates,
-                   std::vector<EyeBox>* eyes) const;
-    void PairEyes(const std::vector<EyeBox>& eyes, std::vector<EyePair>* pairs) const;
+                   std::vector<EyeBox>* eyes);
+    void PairEyes(const std::vector<EyeBox>& eyes, std::vector<EyePair>* pairs);
     void SelectPair(EyeDetResult* result);
 
     bool BuildFaceRoi(const uint8_t* src,

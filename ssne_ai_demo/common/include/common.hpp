@@ -701,7 +701,36 @@ enum class GestureClass : int {
     NUM_CLASSES = 4
 };
 
-static const char* GESTURE_NAMES[4] = { "IDLE", "ROCK", "PAPER", "SCISSORS" };
+static const int APP_GESTURE_COUNT = 4;
+static const int MODEL_OUTPUT_COUNT = 3;
+static const int RPS_MAX_RUNTIME_FRAME_GAP = 6;
+static const int RPS_DEFAULT_FRAME_GAP = 3;
+static const int RPS_DEFAULT_DIFF_THRESHOLD = 30;
+static const int RPS_DEFAULT_DIFF_GAIN = 4;
+static const int RPS_DEFAULT_IDLE_MIN_ACTIVE_PIXELS = 1000;
+static const int RPS_DEBUG_NPU_RAW = 0;
+static const int RPS_DUMP_A1_INPUTS = 0;
+static const char* GESTURE_NAMES[APP_GESTURE_COUNT] = { "IDLE", "ROCK", "PAPER", "SCISSORS" };
+
+struct RuntimeRpsParams {
+    std::atomic<int> frame_gap;
+    std::atomic<int> diff_threshold;
+    std::atomic<int> diff_gain;
+    std::atomic<int> idle_min_active_pixels;
+    std::atomic<int> wind_up_frames;
+    std::atomic<int> vote_frames;
+
+    RuntimeRpsParams()
+        : frame_gap(RPS_DEFAULT_FRAME_GAP),
+          diff_threshold(RPS_DEFAULT_DIFF_THRESHOLD),
+          diff_gain(RPS_DEFAULT_DIFF_GAIN),
+          idle_min_active_pixels(RPS_DEFAULT_IDLE_MIN_ACTIVE_PIXELS),
+          wind_up_frames(15),
+          vote_frames(5) {}
+};
+
+extern RuntimeRpsParams g_runtime_rps_params;
+void PrintRuntimeRpsParams();
 
 enum class GameState {
     IDLE,
@@ -756,16 +785,18 @@ struct TemporalBuffer {
     }
 
     GestureClass GetWeightedVote(int most_recent_n, float* out_confidence) const {
-        float class_score[4] = {0.f, 0.f, 0.f, 0.f};
+        float class_score[APP_GESTURE_COUNT] = {0.f, 0.f, 0.f, 0.f};
         int look = (count < most_recent_n) ? count : most_recent_n;
         for (int i = 0; i < look; i++) {
             int idx = ((head - 1 - i) + CAPACITY) % CAPACITY;
             float weight = static_cast<float>(look - i) / static_cast<float>(look);
             int g = static_cast<int>(gestures[idx]);
-            class_score[g] += weight * confidences[idx];
+            if (g >= 0 && g < APP_GESTURE_COUNT) {
+                class_score[g] += weight * confidences[idx];
+            }
         }
         int best = 0;
-        for (int c = 1; c < 4; c++) {
+        for (int c = 1; c < APP_GESTURE_COUNT; c++) {
             if (class_score[c] > class_score[best]) best = c;
         }
         if (out_confidence) *out_confidence = class_score[best];
@@ -806,7 +837,6 @@ public:
     std::array<int, 2> img_shape;    
     std::array<int, 2> model_shape;  
 
-    static const int WIND_UP_FRAMES      = 15;  
     static const int IDLE_RESET_FRAMES   = 45;  
     static const int DISPLAY_HOLD_FRAMES = 90;  
 
@@ -816,17 +846,21 @@ private:
     ssne_tensor_t outputs[1];   
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
 
-    uint8_t* prev_frame_buf = nullptr;   
-    uint8_t* diff_buf       = nullptr;   
-    bool     has_prev_frame = false;     
-    int      frame_pixels   = 0;         
+    uint8_t* letterbox_buf = nullptr;
+    uint8_t* frame_history[RPS_MAX_RUNTIME_FRAME_GAP] = {nullptr};
+    int history_head = 0;
+    int history_count = 0;
+    int frame_pixels = 0;
+    int frame_count = 0;
+
+    ssne_tensor_t diff_tensor;
 
     TemporalBuffer temporal_buffer;
     GameState      game_state;
     int            state_frame_count;
     GestureClass   locked_prediction;
 
-    void RunSingleFrameInference(ssne_tensor_t* img, float out_probs[4]);
+    void RunSingleFrameInference(ssne_tensor_t* img, float out_probs[APP_GESTURE_COUNT]);
     GestureClass GetCounterMove(GestureClass human_gesture);
     void UpdateStateMachine(GestureClass current_gesture, float current_confidence, RpsResult* result);
 };

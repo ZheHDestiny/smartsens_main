@@ -464,7 +464,16 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
     BuildPyramid(curr_frame, pyramid_curr_);
 
     int levels = (int)pyramid_prev_.size();
+    if (levels <= 0 || pyramid_curr_.size() != pyramid_prev_.size()) return;
     for (auto& f : features) {
+        if (!f.tracked || !std::isfinite(f.x) || !std::isfinite(f.y) ||
+            f.x < 1.0f || f.x >= width_ - 1.0f ||
+            f.y < 1.0f || f.y >= height_ - 1.0f) {
+            f.tracked = false;
+            f.dx = 0.0f;
+            f.dy = 0.0f;
+            continue;
+        }
         const float old_x = f.x;
         const float old_y = f.y;
         float scale = 1.0f / (1 << (levels - 1));
@@ -590,7 +599,7 @@ void OBSTACLE_DETECTOR::DetectObstacles(const std::vector<FeaturePoint>& feature
     global_x.reserve(features.size());
     global_y.reserve(features.size());
     for (const auto& f : features) {
-        if (f.tracked) {
+        if (f.tracked && std::isfinite(f.dx) && std::isfinite(f.dy)) {
             global_x.push_back(f.dx);
             global_y.push_back(f.dy);
         }
@@ -604,9 +613,13 @@ void OBSTACLE_DETECTOR::DetectObstacles(const std::vector<FeaturePoint>& feature
     std::vector<float> region_radial[ObstacleInfo::REGION_COUNT];
     const float region_width = width_ / 3.0f;
     for (const auto& f : features) {
-        if (!f.tracked) continue;
-        const int region = std::min(static_cast<int>(f.x / region_width),
-                                    static_cast<int>(ObstacleInfo::REGION_COUNT) - 1);
+        if (!f.tracked || !std::isfinite(f.x) || !std::isfinite(f.y) ||
+            !std::isfinite(f.dx) || !std::isfinite(f.dy) ||
+            f.x < 0.0f || f.x >= width_ || f.y < 0.0f || f.y >= height_) {
+            continue;
+        }
+        const int region = std::max(0, std::min(static_cast<int>(f.x / region_width),
+                                                static_cast<int>(ObstacleInfo::REGION_COUNT) - 1));
         const float flow_x = f.dx - obstacle_info.global_dx;
         const float flow_y = f.dy - obstacle_info.global_dy;
         const float rx = f.x - width_ * 0.5f;

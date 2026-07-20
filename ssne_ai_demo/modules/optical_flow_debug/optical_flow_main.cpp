@@ -202,16 +202,12 @@ int run_optical_flow_debug() {
             ssne_ok = true;
         }
 
-        // A host UVC viewer or an abruptly terminated demo can leave the
-        // sensor's pipe0 open below IMAGEPROCESSOR's per-object state.  A new
-        // IMAGEPROCESSOR therefore cannot know that it must close it first,
-        // and GetImageData() may wait forever for the first frame.  The
-        // original standalone optical-flow demo also closes pipe0
-        // unconditionally in Release(), so doing the same once here is the
-        // narrow, safe way to start this module from a known state.
-        printf("[图像] 启动前清理 pipe0 残留状态...\n");
-        CloseOnlinePipeline(kPipeline0);
-        usleep(60000);
+        // The previous module owns shutdown of its image pipeline.  Do not
+        // unconditionally close pipe0 here: on A1, closing an already closed
+        // or concurrently released pipe can race the next acquisition and
+        // cause a fault during module switching.  IMAGEPROCESSOR owns the
+        // pipe from this point onward.
+        printf("[图像] 由统一图像管线接管 pipe0...\n");
     }
 
     image_processor.Initialize(&img_shape, 0, 720, 370, 910, 720, 540);
@@ -335,6 +331,25 @@ int run_optical_flow_debug() {
             continue;
         }
         curr_ptr = (uint8_t*)get_data(curr_frame);
+        const size_t expected_frame_bytes =
+            static_cast<size_t>(proc_shape[0]) * static_cast<size_t>(proc_shape[1]);
+        if (curr_ptr == nullptr ||
+            get_width(curr_frame) != proc_shape[0] ||
+            get_height(curr_frame) != proc_shape[1] ||
+            get_mem_size(curr_frame) < expected_frame_bytes) {
+            prev_ptr = nullptr;
+            prev_buf.clear();
+            features.clear();
+            first_frame = true;
+            optical_flow.ResetHistory();
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+                printf("[图像] 丢弃无效帧 descriptor=%dx%d bytes=%zu expected=%zu\n",
+                       get_width(curr_frame), get_height(curr_frame),
+                       get_mem_size(curr_frame), expected_frame_bytes);
+            }
+            usleep(10000);
+            continue;
+        }
 
         auto now = std::chrono::steady_clock::now();
         obstacle_detector.SetFrameInterval(
@@ -424,15 +439,9 @@ int run_optical_flow_debug() {
             }
         }
 
-        size_t frame_bytes = (size_t)proc_shape[0] * (size_t)proc_shape[1];
-        if (curr_ptr != nullptr) {
-            prev_buf.resize(frame_bytes);
-            memcpy(prev_buf.data(), curr_ptr, frame_bytes);
-            prev_ptr = prev_buf.data();
-        } else {
-            prev_ptr = nullptr;
-            prev_buf.clear();
-        }
+        prev_buf.resize(expected_frame_bytes);
+        memcpy(prev_buf.data(), curr_ptr, expected_frame_bytes);
+        prev_ptr = prev_buf.data();
     }
 
     int calc_frames = (frame_count < 10) ? frame_count : 10;
@@ -470,11 +479,11 @@ int run_optical_flow_debug() {
         arduino_bridge.Close();
     }
     
+    visualizer.Clear();
+    visualizer.Release();
     optical_flow.Release();
     obstacle_detector.Release();
     image_processor.Release();
-    
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

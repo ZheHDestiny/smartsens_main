@@ -8,6 +8,9 @@
 #include <limits>
 #include "utils.hpp" // 【新增】引入通用可视化器，用于主菜单的 UI 叠加
 #include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <malloc.h>
 
 extern int run_face_detection();
 extern int run_object_detection();
@@ -17,6 +20,38 @@ extern int run_optical_flow_debug();
 extern int run_facial_expressions();
 extern int run_gesture_detection();
 extern int run_focus_tracking();
+
+namespace {
+
+long read_process_status_kb(const char* key) {
+    FILE* fp = std::fopen("/proc/self/status", "r");
+    if (fp == nullptr) return -1;
+
+    char line[160];
+    long value = -1;
+    const size_t key_len = std::strlen(key);
+    while (std::fgets(line, sizeof(line), fp) != nullptr) {
+        if (std::strncmp(line, key, key_len) == 0) {
+            if (std::sscanf(line + key_len, "%ld", &value) != 1) value = -1;
+            break;
+        }
+    }
+    std::fclose(fp);
+    return value;
+}
+
+void reclaim_module_heap(const char* phase) {
+    const int reclaimed = malloc_trim(0);
+    if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY)) {
+        std::printf("[MEM_RECLAIM] phase=%s trim=%d rss=%ldkB data=%ldkB\n",
+                    phase != nullptr ? phase : "unknown",
+                    reclaimed,
+                    read_process_status_kb("VmRSS:"),
+                    read_process_status_kb("VmData:"));
+    }
+}
+
+}  // namespace
 
 void print_menu() {
     std::cout << "\n======================================================\n";
@@ -86,7 +121,13 @@ int main(int argc, char** argv) {
     int choice = -1;
     
     setup_signal_handlers();
-    
+
+    // Limit long-lived per-thread allocator arenas. Actual trimming is done
+    // only after a module exits, never between menu OSD release and camera
+    // pipeline startup.
+    mallopt(M_ARENA_MAX, 1);
+    mallopt(M_TRIM_THRESHOLD, 64 * 1024);
+
     std::cout << "\033[2J\033[1;1H";
     
     std::array<int, 2> img_shape = {720, 1280};
@@ -180,6 +221,10 @@ int main(int argc, char** argv) {
             default:
                 std::cout << "\n[提示] 无效的选项 (" << choice << ")，请重新选择。\n";
                 break;
+        }
+
+        if (choice >= 1 && choice <= 8) {
+            reclaim_module_heap("module-exit");
         }
     }
     

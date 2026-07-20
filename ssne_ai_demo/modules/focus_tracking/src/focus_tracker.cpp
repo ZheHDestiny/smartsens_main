@@ -368,9 +368,13 @@ void MobileNetFocusSelector::Release() {
     if (inputs[0].data != nullptr) {
         release_tensor(inputs[0]);
     }
+    memset(&inputs[0], 0, sizeof(inputs[0]));
     outputs[0].data = nullptr;
     outputs[1].data = nullptr;
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
     model_id = 0;
     ready_ = false;
 }

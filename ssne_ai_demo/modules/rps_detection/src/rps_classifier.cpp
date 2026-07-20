@@ -342,8 +342,17 @@ void RPSCLASSIFIER::Release() {
             frame_history[i] = nullptr;
         }
     }
-    release_tensor(diff_tensor);
-    release_tensor(inputs[0]);
+    if (get_data(diff_tensor) != nullptr) release_tensor(diff_tensor);
+    if (get_data(inputs[0]) != nullptr) release_tensor(inputs[0]);
+    memset(&diff_tensor, 0, sizeof(diff_tensor));
+    memset(&inputs[0], 0, sizeof(inputs[0]));
     outputs[0].data = nullptr;
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
+    history_head = 0;
+    history_count = 0;
+    frame_pixels = 0;
+    frame_count = 0;
 }

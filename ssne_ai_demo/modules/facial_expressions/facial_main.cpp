@@ -76,7 +76,9 @@ int run_facial_expressions() {
 
     EmotionResult emotion_result;
     VISUALIZER visualizer;
-    visualizer.Initialize(img_shape,"shared_colorLUT.sscl");
+    // Emotion icons are compact; two full 1 MiB RLE buffers unnecessarily
+    // consume most of the A1 board's free CMA/anonymous-memory headroom.
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000);
 
     usleep(200000);
 
@@ -123,9 +125,12 @@ int run_facial_expressions() {
     if (listener_thread.joinable())
         listener_thread.join();
 
+    // Stop OSD first.  The driver must no longer reference texture DMA while
+    // inference and camera resources are being torn down.
+    visualizer.Clear();
+    visualizer.Release();
     classifier.Release();
     processor.Release();
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

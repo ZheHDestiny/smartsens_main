@@ -156,7 +156,7 @@ void YOLOV8_OBJECT::Postprocess(std::vector<std::array<float, 4>>* boxes,
     }
 }
 
-static ssne_tensor_t g_letterbox_tensor;
+static ssne_tensor_t g_letterbox_tensor = {};
 static bool g_lb_init = false;
 
 void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, float conf_threshold) {
@@ -191,9 +191,16 @@ void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, f
     // ---------- 准备 letterbox tensor ----------
     if (!g_lb_init) {
         g_letterbox_tensor = create_tensor(det_shape[0], det_shape[1], SSNE_Y_8, SSNE_BUF_AI);
-        g_lb_init = true;
+        g_lb_init = get_data(g_letterbox_tensor) != nullptr &&
+                    get_mem_size(g_letterbox_tensor) >=
+                        static_cast<size_t>(det_shape[0] * det_shape[1]);
     }
     uint8_t* lb_data = (uint8_t*)get_data(g_letterbox_tensor);
+    if (!g_lb_init || lb_data == nullptr) {
+        fprintf(stderr, "[ERROR] Failed to allocate object letterbox tensor\n");
+        result->Clear();
+        return;
+    }
     // 每次调用前清零整个 tensor，防止 padding 区域被上次推理残留污染
     memset(lb_data, 0, det_shape[0] * det_shape[1]);
 
@@ -278,9 +285,13 @@ void YOLOV8_OBJECT::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, f
 }
 
 void YOLOV8_OBJECT::Release() {
-    release_tensor(inputs[0]);
+    if (get_data(inputs[0]) != nullptr) {
+        release_tensor(inputs[0]);
+        inputs[0].data = nullptr;
+    }
     if (g_lb_init) {
         release_tensor(g_letterbox_tensor);
+        g_letterbox_tensor.data = nullptr;
         g_lb_init = false;
     }
     // NOTE: outputs[i] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
@@ -288,5 +299,8 @@ void YOLOV8_OBJECT::Release() {
     for (int i = 0; i < 6; i++) {
         outputs[i].data = nullptr;
     }
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
 }

@@ -32,7 +32,8 @@ class VISUALIZER {
 public:
     void Initialize(std::array<int, 2>& in_img_shape,
                     const std::string& bitmap_lut_path = "",
-                    int image_dma_size = 0x100000);
+                    int image_dma_size = 0x100000,
+                    uint32_t image_layer_mask = (1u << 2) | (1u << 5));
     void Release();
     void Clear();
 

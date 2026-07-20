@@ -227,8 +227,8 @@ public:
 
 private:
     uint16_t model_id = 0;
-    ssne_tensor_t inputs[1];
-    ssne_tensor_t outputs[6];
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[6] = {};
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
     std::vector<std::array<float, 4>> anchors;
 
@@ -249,8 +249,8 @@ public:
 private:
     uint16_t model_id = 0;
     AiPreprocessPipe pipe_offline; 
-    ssne_tensor_t inputs[1];
-    ssne_tensor_t outputs[6]; 
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[6] = {};
 
     std::array<int, 2> img_shape;
     std::array<int, 2> det_shape;
@@ -294,8 +294,8 @@ private:
     
     uint16_t model_id = 0;
     AiPreprocessPipe pipe_offline; 
-    ssne_tensor_t inputs[1];
-    ssne_tensor_t outputs[6];
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[6] = {};
 
     const int kNumClasses = 3; 
     const int kRegBins = 16;
@@ -486,8 +486,8 @@ public:
 
 private:
     uint16_t model_id = 0;
-    ssne_tensor_t inputs[1];
-    ssne_tensor_t outputs[2];
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[2] = {};
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
     std::array<int, 2> img_shape;
     std::array<int, 2> model_shape;
@@ -605,12 +605,12 @@ private:
     uint16_t faceid_model_id_ = 0;
     AiPreprocessPipe eyedet_pipe_ = nullptr;
     AiPreprocessPipe faceid_pipe_ = nullptr;
-    ssne_tensor_t det_canvas_;
-    ssne_tensor_t det_input_;
-    ssne_tensor_t det_outputs_[6];
-    ssne_tensor_t face_roi_;
-    ssne_tensor_t face_input_;
-    ssne_tensor_t face_output_[1];
+    ssne_tensor_t det_canvas_ = {};
+    ssne_tensor_t det_input_ = {};
+    ssne_tensor_t det_outputs_[6] = {};
+    ssne_tensor_t face_roi_ = {};
+    ssne_tensor_t face_input_ = {};
+    ssne_tensor_t face_output_[1] = {};
 
     bool initialized_ = false;
     bool eyedet_ready_ = false;
@@ -842,9 +842,11 @@ public:
 
 private:
     uint16_t      model_id = 0;
-    ssne_tensor_t inputs[1];    
-    ssne_tensor_t outputs[1];   
-    AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[1] = {};
+    // RPS writes its already-resized difference image directly into the model
+    // input tensor; it does not need an offline preprocessing pipe.
+    AiPreprocessPipe pipe_offline = nullptr;
 
     uint8_t* letterbox_buf = nullptr;
     uint8_t* frame_history[RPS_MAX_RUNTIME_FRAME_GAP] = {nullptr};
@@ -853,7 +855,7 @@ private:
     int frame_pixels = 0;
     int frame_count = 0;
 
-    ssne_tensor_t diff_tensor;
+    ssne_tensor_t diff_tensor = {};
 
     TemporalBuffer temporal_buffer;
     GameState      game_state;
@@ -928,7 +930,7 @@ private:
     static const uint64_t UNCERTAIN_TIMEOUT_MS = 1000;
 
     uint16_t model_id = 0;
-    ssne_tensor_t inputs[1]; ssne_tensor_t outputs[1];
+    ssne_tensor_t inputs[1] = {}; ssne_tensor_t outputs[1] = {};
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
     uint8_t* prev_frame_buf = nullptr; uint8_t* diff_buf = nullptr;
     bool has_prev_frame = false; int frame_pixels = 0;
@@ -1025,9 +1027,10 @@ public:
     void Release();
     std::array<int, 2> img_shape; std::array<int, 2> model_shape;
 private:
-    uint16_t model_id = 0;
-    ssne_tensor_t inputs[1]; ssne_tensor_t outputs[1];
+    int model_id = -1;
+    ssne_tensor_t inputs[1] = {}; ssne_tensor_t outputs[1] = {};
     AiPreprocessPipe pipe_offline = GetAIPreprocessPipe();
+    bool model_ready = false;
     uint8_t* prev_frame_buf = nullptr; uint8_t* diff_buf = nullptr;
     bool has_prev_frame = false; int frame_pixels = 0;
     HandGestureTemporalBuffer temporal_buffer;

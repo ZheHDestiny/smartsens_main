@@ -148,9 +148,10 @@ int run_face_detection() {
     }
 
     delete det_result;
+    visualizer.Clear();
+    visualizer.Release();
     detector.Release();
     processor.Release();
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

@@ -124,7 +124,9 @@ int run_rps_detection() {
 
     RpsResult rps_result;
     VISUALIZER visualizer;
-    visualizer.Initialize(image_shape);
+    // Keep hardware layer 2/5 as RLE layers. RPS vector graphics are assigned
+    // only to the known graphic layers 0/1/3/4 by VISUALIZER::Draw().
+    visualizer.Initialize(image_shape, "", 0x20000);
     usleep(200000);
 
     ssne_tensor_t image_sensor;

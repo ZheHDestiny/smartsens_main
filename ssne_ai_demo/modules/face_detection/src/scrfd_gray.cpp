@@ -444,9 +444,13 @@ void SCRFDGRAY::Predict(ssne_tensor_t* img, FaceDetectionResult* result, float c
  * @description 释放所有tensor、预处理管道和计时器资源
  */
 void SCRFDGRAY::Release() {
-    release_tensor(inputs[0]);
+    if (get_data(inputs[0]) != nullptr) release_tensor(inputs[0]);
+    memset(&inputs[0], 0, sizeof(inputs[0]));
     for (int i = 0; i < 6; i++) {
         outputs[i].data = nullptr;
     }
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
 }

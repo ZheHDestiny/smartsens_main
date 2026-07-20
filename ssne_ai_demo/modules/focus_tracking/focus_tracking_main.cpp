@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <malloc.h>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -1182,9 +1183,10 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
            final_health.recover_attempts,
            final_health.recover_failures);
 
+    visualizer.Clear();
+    visualizer.Release();
     tracker.Reset();
     smart_engine.Release();
-    visualizer.Release();
     image_processor.Release();
 
     {
@@ -1207,8 +1209,14 @@ int run_focus_tracking() {
             return 0;
         }
 
+        // Modes 8-1/8-2/8-3 switch inside this submenu and therefore do not
+        // pass through main.cpp's module-exit reclaim point. Return the heap
+        // left by MotionGuard/FaceID scratch vectors before loading the next
+        // (potentially two-model) mode.
+        malloc_trim(0);
         cout << "\n>> 正在启动 [" << focus_mode_name(selected_mode) << "] 子功能...\n";
         int ret = run_focus_tracking_mode(selected_mode);
+        malloc_trim(0);
         if (g_signal_received.load()) {
             return ret;
         }

@@ -668,13 +668,17 @@ void EMOTIONCLASSIFIER::Release() {
     if (prev_frame_buf) { delete[] prev_frame_buf; prev_frame_buf = nullptr; }
     if (diff_buf) { delete[] diff_buf;       diff_buf = nullptr; }
 
-    release_tensor(inputs[0]);
+    if (get_data(inputs[0]) != nullptr) release_tensor(inputs[0]);
+    memset(&inputs[0], 0, sizeof(inputs[0]));
 
     // NOTE: outputs[0] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
     // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
     outputs[0].data = nullptr;
 
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
     temporal_buffer.Reset();
     has_prev_frame = false;
     model_ready = false;

@@ -171,9 +171,10 @@ int run_object_detection() {
 
     if (listener_thread.joinable()) listener_thread.join();
 
+    visualizer.Clear();
+    visualizer.Release();
     detector.Release();
     processor.Release();
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

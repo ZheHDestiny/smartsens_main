@@ -303,7 +303,8 @@ static const char* focus_face_bitmap() {
 
 void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
                             const std::string& bitmap_lut_path,
-                            int image_dma_size) {
+                            int image_dma_size,
+                            uint32_t image_layer_mask) {
     m_width = in_img_shape[0];
     m_height = in_img_shape[1];
 
@@ -313,11 +314,15 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
         lut_path = m_bitmap_lut_path_full.c_str();
     }
     
-    osd_device.Initialize(m_width, m_height, lut_path, image_dma_size);
+    osd_device.Initialize(m_width, m_height, lut_path, image_dma_size,
+                          image_layer_mask);
     enabled_ = osd_device.IsEnabled();
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
     focus_face_icon_drawn_ = false;
+    last_drawn_emotion = EmotionClass::NUM_CLASSES;
+    candidate_emotion = EmotionClass::NUM_CLASSES;
+    emotion_hold_count = 0;
     
     if (!enabled_) {
         std::cerr << "[VISUALIZER] Warning: OSD device not enabled or initialization failed." << std::endl;
@@ -330,6 +335,9 @@ void VISUALIZER::Release() {
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
     focus_face_icon_drawn_ = false;
+    last_drawn_emotion = EmotionClass::NUM_CLASSES;
+    candidate_emotion = EmotionClass::NUM_CLASSES;
+    emotion_hold_count = 0;
 }
 
 void VISUALIZER::Clear() {
@@ -1057,11 +1065,15 @@ void VISUALIZER::DrawPaper(int layer_id, int cx, int y0, int color, bool active)
     const int H = ICON_H;
     int x0 = cx - W / 2;
 
-    int finger_w  = 22;                             
-    int finger_gap = (W - 5 * finger_w) / 4;        
+    // A1 accepts at most four quadrangles intersecting one scanline on a
+    // graphic layer. Use a clear three-finger palm symbol instead of five
+    // parallel rectangles, which made the final add fail intermittently.
+    const int finger_count = 3;
+    int finger_w  = 36;
+    int finger_gap = (W - finger_count * finger_w) / (finger_count - 1);
     int finger_h  = static_cast<int>(H * 0.58f);    
 
-    for (int f = 0; f < 5; f++) {
+    for (int f = 0; f < finger_count; f++) {
         int fx0 = x0 + f * (finger_w + finger_gap);
         int fx1 = fx0 + finger_w;
         int fy0 = y0;
@@ -1078,47 +1090,31 @@ void VISUALIZER::DrawPaper(int layer_id, int cx, int y0, int color, bool active)
 }
 
 void VISUALIZER::DrawScissors(int layer_id, int cx, int y0, int color, bool active) {
+    // A1 graphic OSD has a small per-submit rectangle budget.  The old
+    // scissors icon used 11 rectangles; when the budget was exceeded the
+    // whole layer was rejected, so scissors disappeared for both players.
+    // Keep the icon recognizable with four axis-aligned rectangles.
     std::vector<std::array<float,4>> boxes;
     const int W = 160;
     const int H = ICON_H;
     int x0 = cx - W / 2;
     int x1 = cx + W / 2;
 
-    int finger_w = 28;
-    int finger_h = static_cast<int>(H * 0.35f);
+    const int finger_w = 30;
+    const int finger_y1 = y0 + static_cast<int>(H * 0.42f);
+    boxes.push_back({ (float)(x0 + 8), (float)y0,
+                      (float)(x0 + 8 + finger_w), (float)finger_y1 });
+    boxes.push_back({ (float)(x1 - 8 - finger_w), (float)y0,
+                      (float)(x1 - 8), (float)finger_y1 });
 
-    int lf_x0 = x0 + 8;
-    int lf_x1 = lf_x0 + finger_w;
-    boxes.push_back({ (float)lf_x0, (float)y0, (float)lf_x1, (float)(y0 + finger_h) });
+    const int palm_y0 = y0 + static_cast<int>(H * 0.43f);
+    const int palm_y1 = y0 + static_cast<int>(H * 0.75f);
+    boxes.push_back({ (float)(x0 + 10), (float)palm_y0,
+                      (float)(x1 - 10), (float)palm_y1 });
 
-    int rf_x1 = x1 - 8;
-    int rf_x0 = rf_x1 - finger_w;
-    boxes.push_back({ (float)rf_x0, (float)y0, (float)rf_x1, (float)(y0 + finger_h) });
-
-    int fork_y0 = y0 + finger_h;
-    int fork_h  = static_cast<int>(H * 0.28f);
-    int fork_y1 = fork_y0 + fork_h;
-
-    int steps = 4;
-    for (int s = 0; s < steps; s++) {
-        float t0 = (float)s / steps;
-        float t1 = (float)(s + 1) / steps;
-        int lx0 = lf_x0 + (int)((cx - 26 - lf_x0) * t0);
-        int lx1 = lf_x1 + (int)((cx -  6 - lf_x1) * t0);
-        int sy0 = fork_y0 + (int)(fork_h * t0);
-        int sy1 = fork_y0 + (int)(fork_h * t1);
-        boxes.push_back({ (float)lx0, (float)sy0, (float)lx1, (float)sy1 });
-
-        int rx0 = rf_x0 + (int)((cx +  6 - rf_x0) * t0);
-        int rx1 = rf_x1 + (int)((cx + 26 - rf_x1) * t0);
-        boxes.push_back({ (float)rx0, (float)sy0, (float)rx1, (float)sy1 });
-    }
-
-    int palm_y0 = fork_y1 + 4;
-    int palm_y1 = palm_y0 + static_cast<int>(H * 0.18f);
-    int palm_x0 = x0 + 10;
-    int palm_x1 = x1 - 10;
-    boxes.push_back({ (float)palm_x0, (float)palm_y0, (float)palm_x1, (float)palm_y1 });
+    const int wrist_y0 = y0 + static_cast<int>(H * 0.79f);
+    boxes.push_back({ (float)(cx - 42), (float)wrist_y0,
+                      (float)(cx + 42), (float)(y0 + H) });
 
     int border = active ? 10 : 2;
     CommitBoxes(layer_id, border, active ? color : C_IDLE, boxes);
@@ -1202,14 +1198,56 @@ void VISUALIZER::Draw(const RpsResult& result, const std::array<float, 4>& hand_
             break;
     }
     if (result.is_locked && result.ai_counter != GestureClass::IDLE) {
-        DrawGestureIcon(2, AI_CX, ICON_Y0, result.ai_counter, true);
+        DrawGestureIcon(3, AI_CX, ICON_Y0, result.ai_counter, true);
     } else {
-        DrawGestureIcon(2, AI_CX, ICON_Y0, GestureClass::IDLE, false);
+        DrawGestureIcon(3, AI_CX, ICON_Y0, GestureClass::IDLE, false);
     }
 
-    DrawStatusBar(3, result.game_state, result.human_gesture);
-    int conf_color = (result.is_locked) ? GestureColor(result.human_gesture) : C_IDLE;
-    DrawConfBar(4, result.confidence, conf_color);
+    // Layer 2 is a hardware RLE layer and rejects vector quadrangles even if
+    // requested otherwise. Keep both gesture pictures on known graphic layers
+    // (human=1, AI=3), then combine status and confidence into one submission
+    // on layer 4 so no required visual element is lost.
+    std::vector<OsdQR> hud;
+    OsdQR status;
+    status.box = {static_cast<float>(STATUS_X1), static_cast<float>(STATUS_Y1),
+                  static_cast<float>(STATUS_X2), static_cast<float>(STATUS_Y2)};
+    status.layer_id = 4;
+    status.type = fdevice::TYPE_HOLLOW;
+    status.alpha = fdevice::TYPE_ALPHA75;
+    status.border = 2;
+    status.color = C_IDLE;
+    switch (result.game_state) {
+        case GameState::WIND_UP:
+            status.border = 6;
+            status.color = C_WINDUP;
+            break;
+        case GameState::PREDICTED:
+        case GameState::DISPLAY:
+            status.border = 10;
+            status.color = GestureColor(result.human_gesture);
+            break;
+        default:
+            break;
+    }
+    hud.push_back(status);
+
+    const float confidence = clampf(result.confidence, 0.0f, 1.0f);
+    const float confidence_width = CONF_MAXW * confidence;
+    if (confidence_width >= 2.0f) {
+        OsdQR confidence_bar;
+        confidence_bar.box = {
+            static_cast<float>(CONF_X0), static_cast<float>(CONF_Y1),
+            static_cast<float>(CONF_X0) + confidence_width,
+            static_cast<float>(CONF_Y2)};
+        confidence_bar.layer_id = 4;
+        confidence_bar.type = fdevice::TYPE_SOLID;
+        confidence_bar.alpha = fdevice::TYPE_ALPHA75;
+        confidence_bar.border = 0;
+        confidence_bar.color = result.is_locked
+            ? GestureColor(result.human_gesture) : C_IDLE;
+        hud.push_back(confidence_bar);
+    }
+    osd_device.Draw(hud, 4);
 }
 
 namespace utils {

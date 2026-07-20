@@ -502,9 +502,10 @@ int run_speed_detection() {
     (void)stats_end;
     printf("[SPEED_STATS] frames=%zu\n", processed_frames);
 
+    visualizer.Clear();
+    visualizer.Release();
     detector.Release();
     processor.Release();
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

@@ -206,11 +206,15 @@ void YOLOV8_SPEED::Predict(ssne_tensor_t* img, ObjectDetectionResult* result, fl
 }
 
 void YOLOV8_SPEED::Release() {
-    release_tensor(inputs[0]);
+    if (get_data(inputs[0]) != nullptr) release_tensor(inputs[0]);
+    memset(&inputs[0], 0, sizeof(inputs[0]));
     // NOTE: outputs[i] 由 ssne_getoutput 填充，其 data 指向模型内部 buffer，
     // 不应由 release_tensor 释放。ssne_release() 会统一释放模型资源。
     for(int i=0; i<6; i++) {
         outputs[i].data = nullptr;
     }
-    ReleaseAIPreprocessPipe(pipe_offline);
+    if (pipe_offline != nullptr) {
+        ReleaseAIPreprocessPipe(pipe_offline);
+        pipe_offline = nullptr;
+    }
 }

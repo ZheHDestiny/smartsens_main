@@ -100,23 +100,39 @@ int run_gesture_detection() {
 
     HandGestureResult gesture_result;
     VISUALIZER visualizer;
-    visualizer.Initialize(img_shape);
+    // Gesture OSD uses only vector layers 0/1/3. Avoid reserving the menu's
+    // full-screen 1 MiB RLE pair in this long-running mode.
+    visualizer.Initialize(img_shape, "", 0x20000);
 
     usleep(200000);
 
     ssne_tensor_t img_sensor;
     memset(&img_sensor, 0, sizeof(img_sensor));
 
+    // Camera frames belong to the live capture/display pipeline and must be
+    // treated as read-only.  Background subtraction and CLAHE operate on this
+    // private tensor instead of corrupting the camera DMA buffer in place.
+    ssne_tensor_t gesture_frame = create_tensor(
+        crop_shape[0], crop_shape[1], SSNE_Y_8, SSNE_BUF_AI);
+
     // 背景减除相关变量
     const int crop_pixels = crop_shape[0] * crop_shape[1];
     uint8_t* background = new uint8_t[crop_pixels];
     bool bg_captured = false;
 
-    std::thread listener_thread(keyboard_listener);
+    std::thread listener_thread;
     HandGestureClass last_reported_gesture = HandGestureClass::NUM_CLASSES;
     bool last_reported_clahe = false;
     auto last_result_report = std::chrono::steady_clock::now()
                             - std::chrono::seconds(1);
+
+    if (get_data(gesture_frame) == nullptr ||
+        get_mem_size(gesture_frame) < static_cast<size_t>(crop_pixels)) {
+        fprintf(stderr,
+                "[GESTURE] ERROR: failed to allocate private preprocessing tensor.\n");
+        goto cleanup;
+    }
+    listener_thread = std::thread(keyboard_listener);
 
     // ========== 捕获背景帧 ==========
     {
@@ -133,7 +149,8 @@ int run_gesture_detection() {
         processor.GetImage(&img_sensor);
         // 使用 get_data() 获取 CPU 可访问的映射地址
         void* img_data = get_data(img_sensor);
-        if (img_data != nullptr) {
+        if (img_data != nullptr &&
+            get_mem_size(img_sensor) >= static_cast<size_t>(crop_pixels)) {
             memcpy(background, img_data, crop_pixels);
             bg_captured = true;
             std::cout << "背景已捕获。" << std::endl;
@@ -151,19 +168,24 @@ int run_gesture_detection() {
             processor.GetImage(&img_sensor);
             // 使用 get_data() 获取 CPU 可访问的映射地址
             void* img_data = get_data(img_sensor);
-            if (img_data == nullptr) {
+            uint8_t* work_data = static_cast<uint8_t*>(get_data(gesture_frame));
+            if (img_data == nullptr || work_data == nullptr ||
+                get_mem_size(img_sensor) < static_cast<size_t>(crop_pixels) ||
+                get_mem_size(gesture_frame) < static_cast<size_t>(crop_pixels)) {
                 usleep(10000);
                 continue;
             }
 
-            // 使用 get_data() 返回的指针进行原地背景减除
+            memcpy(work_data, img_data, crop_pixels);
+
+            // Only the private work tensor may be modified.
             if (bg_captured) {
-                uint8_t* curr = static_cast<uint8_t*>(img_data);
-                subtract_background(curr, background, curr, crop_pixels, 30);
+                subtract_background(
+                    work_data, background, work_data, crop_pixels, 30);
             }
 
             bool use_clahe = check_clahe_flag();
-            classifier.Predict(&img_sensor, &gesture_result, use_clahe);
+            classifier.Predict(&gesture_frame, &gesture_result, use_clahe);
             visualizer.Draw(gesture_result, hand_roi);
 
             const auto report_now = std::chrono::steady_clock::now();
@@ -192,9 +214,16 @@ cleanup:
 
     delete[] background;
 
+    visualizer.Clear();
+    visualizer.Release();
+
+    if (get_data(gesture_frame) != nullptr) {
+        release_tensor(gesture_frame);
+        gesture_frame.data = nullptr;
+    }
+
     classifier.Release();
     processor.Release();
-    visualizer.Release();
 
     {
         SigintBlocker blocker;

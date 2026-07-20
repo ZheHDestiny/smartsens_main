@@ -25,6 +25,14 @@ include_directories(${CMAKE_SOURCE_DIR}/modules/arduino_bridge)
 # 1. 搜集 common 下的所有公共核心源文件
 file(GLOB COMMON_SRC "${CMAKE_SOURCE_DIR}/common/src/*.cpp")
 
+# CMake 3.0 的 GLOB 不会可靠地感知增量构建中新加入的源文件。
+# 显式列出官方性能统计实现，避免旧 Buildroot/CMake 缓存只看到头文件，
+# 最终在链接阶段出现 OfficialPerf* undefined reference。
+list(APPEND COMMON_SRC
+    "${CMAKE_SOURCE_DIR}/common/src/official_perf.cpp"
+)
+list(REMOVE_DUPLICATES COMMON_SRC)
+
 # 2. 搜集各个业务模块的源文件
 file(GLOB BUSINESS_SRC 
     "${CMAKE_SOURCE_DIR}/modules/face_detection/*.cpp"

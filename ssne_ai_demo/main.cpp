@@ -11,6 +11,10 @@
 #include <cstdio>
 #include <cstring>
 #include <malloc.h>
+#include <cerrno>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 extern int run_face_detection();
 extern int run_object_detection();
@@ -49,6 +53,43 @@ void reclaim_module_heap(const char* phase) {
                     read_process_status_kb("VmRSS:"),
                     read_process_status_kb("VmData:"));
     }
+}
+
+typedef int (*ModuleEntry)();
+
+int run_module_isolated(const char* feature, ModuleEntry entry) {
+    // SSNE has no per-model unload API and repeated ssne_release()/initial()
+    // cycles leave board-driver/CMA mappings behind on some firmware builds.
+    // A short-lived worker process gives every menu invocation a hard kernel
+    // resource boundary; exit also cleans up safely after an SDK-side fault.
+    reclaim_module_heap("before-fork");
+    std::fflush(nullptr);
+    const pid_t pid = fork();
+    if (pid < 0) {
+        std::perror("[MODULE_ISOLATION] fork failed");
+        return -1;
+    }
+    if (pid == 0) {
+        g_signal_received.store(false);
+        OfficialPerfReset(feature, 90.0f);
+        const int rc = entry();
+        OfficialPerfPrintFinal();
+        std::fflush(nullptr);
+        _exit(rc == 0 ? 0 : 1);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        std::perror("[MODULE_ISOLATION] waitpid failed");
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        std::printf("[MODULE_ISOLATION] feature=%s worker terminated by signal=%d\n",
+                    feature, WTERMSIG(status));
+        return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 }  // namespace
@@ -92,7 +133,7 @@ RuntimeLogMode choose_runtime_log_mode() {
         std::cout << "  说明：业务识别结果始终输出；以下选项只控制额外诊断日志\n";
         std::cout << "  0. 静默模式：仅输出业务结果，最低串口开销\n";
         std::cout << "  1. 摘要模式：业务结果 + 每秒公共管线健康摘要\n";
-        std::cout << "  2. 验证模式：业务结果 + FPS/P95/图像质量/调试统计\n";
+        std::cout << "  2. 验证模式：业务结果 + 官方口径FPS/P95/T评分/图像质量\n";
         std::cout << "======================================================\n";
         std::cout << "请选择日志模式 (0-2) 并按回车: ";
         std::cin >> choice;
@@ -177,42 +218,42 @@ int main(int argc, char** argv) {
         switch (choice) {
             case 1:
                 std::cout << "\n>> 正在启动 [人脸检测] 模块...\n";
-                run_face_detection();
+                run_module_isolated("face_detection", run_face_detection);
                 std::cout << "\n>> [人脸检测] 模块已安全退出，返回主菜单。\n";
                 break;
             case 2:
                 std::cout << "\n>> 正在启动 [目标检测] 模块...\n";
-                run_object_detection();
+                run_module_isolated("object_detection", run_object_detection);
                 std::cout << "\n>> [目标检测] 模块已安全退出，返回主菜单。\n";
                 break;
             case 3:
                 std::cout << "\n>> 正在启动 [速度检测] 模块...\n";
-                run_speed_detection();
+                run_module_isolated("speed_detection", run_speed_detection);
                 std::cout << "\n>> [速度检测] 模块已安全退出，返回主菜单。\n";
                 break;
             case 4:
                 std::cout << "\n>> 正在启动 [剪刀石头布] 模块...\n";
-                run_rps_detection();
+                run_module_isolated("rps_detection", run_rps_detection);
                 std::cout << "\n>> [剪刀石头布] 模块已安全退出，返回主菜单。\n";
                 break;
             case 5:
                 std::cout << "\n>> 正在启动 [光流避障] 模块...\n";
-                run_optical_flow_debug();
+                run_module_isolated("optical_flow", run_optical_flow_debug);
                 std::cout << "\n>> [光流避障] 模块已安全退出，返回主菜单。\n";
                 break;
             case 6:
                 std::cout << "\n>> 正在启动 [表情识别] 模块...\n";
-                run_facial_expressions();
+                run_module_isolated("facial_expression", run_facial_expressions);
                 std::cout << "\n>> [表情识别] 模块已安全退出，返回主菜单。\n";
                 break;
             case 7:
                 std::cout << "\n>> 正在启动 [手势识别] 模块...\n";
-                run_gesture_detection();
+                run_module_isolated("gesture_detection", run_gesture_detection);
                 std::cout << "\n>> [手势识别] 模块已安全退出，返回主菜单。\n";
                 break;
             case 8:
                 std::cout << "\n>> 进入 [追焦功能] 子菜单...\n";
-                run_focus_tracking();
+                run_module_isolated("focus_tracking", run_focus_tracking);
                 std::cout << "\n>> 已离开 [追焦功能]，返回主菜单。\n";
                 break;
             case 0:

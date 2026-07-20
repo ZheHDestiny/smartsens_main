@@ -21,6 +21,7 @@
 #include <termios.h>
 #include <chrono>
 #include "smartsoc/ssne_api.h"
+#include "official_perf.hpp"
 
 enum class ImagePipelineHealthState {
     OK = 0,
@@ -366,6 +367,16 @@ public:
     int lk_max_iter;       
     float lk_epsilon;      
     float lk_min_eig;      
+
+    // Last-frame diagnostics used only by VERIFY mode. They are fixed-size
+    // counters and add no per-frame allocation or serial overhead otherwise.
+    int debug_input_points = 0;
+    int debug_tracked_points = 0;
+    int debug_inactive_rejects = 0;
+    int debug_geometry_rejects = 0;
+    int debug_lk_failures = 0;
+    int debug_photometric_rejects = 0;
+    int debug_motion_rejects = 0;
 
 private:
     int width_, height_;

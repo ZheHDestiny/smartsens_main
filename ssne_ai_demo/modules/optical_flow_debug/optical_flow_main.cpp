@@ -191,24 +191,12 @@ int run_optical_flow_debug() {
     printf("[配置] 图像参数\n");
     printf("  • 处理分辨率: %dx%d\n\n", proc_shape[0], proc_shape[1]);
 
-    bool ssne_ok = false;
     IMAGEPROCESSOR image_processor;
-    
-    {
-        SigintBlocker blocker;
-        if (ssne_initial() != 0) {
-            fprintf(stderr, "[WARN] ssne_initial() failed!\n");
-        } else {
-            ssne_ok = true;
-        }
 
-        // The previous module owns shutdown of its image pipeline.  Do not
-        // unconditionally close pipe0 here: on A1, closing an already closed
-        // or concurrently released pipe can race the next acquisition and
-        // cause a fault during module switching.  IMAGEPROCESSOR owns the
-        // pipe from this point onward.
-        printf("[图像] 由统一图像管线接管 pipe0...\n");
-    }
+    // This is a CPU-only module. Calling ssne_initial() here used to reserve
+    // NPU/OCM resources that optical flow never uses and could strand them
+    // across menu switches. IMAGEPROCESSOR exclusively owns pipe0.
+    printf("[图像] 由统一图像管线接管 pipe0（CPU-only，不初始化 NPU）...\n");
 
     image_processor.Initialize(&img_shape, 0, 720, 370, 910, 720, 540);
     printf("  ✓ 图像管道已打开\n\n");
@@ -279,8 +267,11 @@ int run_optical_flow_debug() {
 
     thread listener_thread(keyboard_listener);
 
+    // Replace any stale layer content immediately; do not wait until the
+    // fifth processed frame for the first optical-flow UI update.
+    visualizer.DrawAll(features, obstacle_info, 370, 0);
+
     {
-        SigintBlocker blocker;
         while (!check_exit_flag()) {
         if (g_signal_received.load()) break;
 
@@ -406,8 +397,9 @@ int run_optical_flow_debug() {
                 last_event_log = now;
             }
 
-            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY) &&
-                std::chrono::duration<float>(now - last_status_report).count() >= 2.0f) {
+            const float status_age =
+                std::chrono::duration<float>(now - last_status_report).count();
+            if (RuntimeLogAtLeast(RuntimeLogMode::VERIFY) && status_age >= 2.0f) {
                 const int sample_count = std::min(frame_count, static_cast<uint32_t>(10));
                 const auto oldest = frame_times[(frame_count + 10 - sample_count) % 10];
                 const float elapsed = std::chrono::duration<float>(now - oldest).count();
@@ -416,6 +408,26 @@ int run_optical_flow_debug() {
                        optical_state_name(curr_priority), fps, tracked_count, features.size(),
                        clear_corridor_name(obstacle_info.safest_region),
                        100.0f * obstacle_info.tracking_quality);
+                printf("[FLOW_DEBUG] input=%d tracked=%d reject={inactive:%d geometry:%d lk:%d photo:%d motion:%d} "
+                       "support={L:%d C:%d R:%d}\n",
+                       optical_flow.debug_input_points,
+                       optical_flow.debug_tracked_points,
+                       optical_flow.debug_inactive_rejects,
+                       optical_flow.debug_geometry_rejects,
+                       optical_flow.debug_lk_failures,
+                       optical_flow.debug_photometric_rejects,
+                       optical_flow.debug_motion_rejects,
+                       obstacle_info.support_count[ObstacleInfo::LEFT],
+                       obstacle_info.support_count[ObstacleInfo::CENTER],
+                       obstacle_info.support_count[ObstacleInfo::RIGHT]);
+                last_status_report = now;
+            } else if (!RuntimeLogAtLeast(RuntimeLogMode::VERIFY) && status_age >= 3.0f) {
+                // Low-rate business heartbeat: in silent mode a stable SAFE
+                // scene previously produced no text at all and looked frozen.
+                printf("[避障][状态] %s；推荐%s，可靠点=%d。\n",
+                       optical_state_name(curr_priority),
+                       clear_corridor_name(obstacle_info.safest_region),
+                       obstacle_info.support_count[curr_region]);
                 last_status_report = now;
             }
             
@@ -485,13 +497,7 @@ int run_optical_flow_debug() {
     obstacle_detector.Release();
     image_processor.Release();
 
-    {
-        SigintBlocker blocker;
-        if (ssne_ok) {
-            ssne_release();
-        }
-    }
-    usleep(500000);
+    usleep(100000);
 
     printf("\n════════════════════════════════════════════════════════════\n");
     printf("     光流检测结束，返回主菜单\n");

@@ -229,36 +229,53 @@ void OPTICALFLOW::DetectFeatures(const uint8_t* frame,
     // as enough usable corners are found instead of collecting and sorting
     // thousands of candidates. Sparse scenes still receive the full scan,
     // where FAST's four-pixel early rejection is inexpensive.
-    for (int gy = 0; gy < grid_rows; ++gy) {
-        const int y0 = std::max(margin, gy * height_ / grid_rows);
-        const int y1 = std::min(height_ - margin, (gy + 1) * height_ / grid_rows);
-        for (int gx = 0; gx < grid_cols; ++gx) {
-            const int x0 = std::max(margin, gx * width_ / grid_cols);
-            const int x1 = std::min(width_ - margin, (gx + 1) * width_ / grid_cols);
-            std::vector<FeaturePoint>& cell = cells[gy * grid_cols + gx];
-            for (int row = y0; row < y1 && static_cast<int>(cell.size()) < per_cell;
-                 row += scan_step) {
-                for (int col = x0; col < x1 && static_cast<int>(cell.size()) < per_cell;
-                     col += scan_step) {
-                    const float score = fast9_score(frame, width_, height_, row, col,
-                                                    fast_threshold);
-                    if (score <= 0.0f) continue;
-                    bool separated = true;
-                    for (const auto& accepted : cell) {
-                        const float dx = accepted.x - col;
-                        const float dy = accepted.y - row;
-                        if (dx * dx + dy * dy < nms_radius * nms_radius) {
-                            separated = false;
-                            break;
+    const auto scan_cells = [&](int threshold) {
+        for (int gy = 0; gy < grid_rows; ++gy) {
+            const int y0 = std::max(margin, gy * height_ / grid_rows);
+            const int y1 = std::min(height_ - margin, (gy + 1) * height_ / grid_rows);
+            for (int gx = 0; gx < grid_cols; ++gx) {
+                const int x0 = std::max(margin, gx * width_ / grid_cols);
+                const int x1 = std::min(width_ - margin, (gx + 1) * width_ / grid_cols);
+                std::vector<FeaturePoint>& cell = cells[gy * grid_cols + gx];
+                for (int row = y0; row < y1 && static_cast<int>(cell.size()) < per_cell;
+                     row += scan_step) {
+                    for (int col = x0; col < x1 && static_cast<int>(cell.size()) < per_cell;
+                         col += scan_step) {
+                        const float score = fast9_score(frame, width_, height_, row, col,
+                                                        threshold);
+                        if (score <= 0.0f) continue;
+                        bool separated = true;
+                        for (const auto& accepted : cell) {
+                            const float dx = accepted.x - col;
+                            const float dy = accepted.y - row;
+                            if (dx * dx + dy * dy < nms_radius * nms_radius) {
+                                separated = false;
+                                break;
+                            }
                         }
-                    }
-                    if (separated) {
-                        cell.emplace_back(static_cast<float>(col),
-                                          static_cast<float>(row), score);
+                        if (separated) {
+                            cell.emplace_back(static_cast<float>(col),
+                                              static_cast<float>(row), score);
+                            // A freshly detected corner is an active LK seed.
+                            // The previous guard treated tracked=false as an
+                            // invalid seed, so every new point was discarded
+                            // before LK ran and reliable points stayed at 0.
+                            cell.back().tracked = true;
+                        }
                     }
                 }
             }
         }
+    };
+
+    scan_cells(fast_threshold);
+    size_t candidate_count = 0;
+    for (const auto& cell : cells) candidate_count += cell.size();
+    if (candidate_count < 24) {
+        // Low-texture walls and dim scenes need a gentler FAST threshold.
+        // This second pass runs only when the cheap primary pass was sparse,
+        // keeping cluttered-scene runtime bounded.
+        scan_cells(std::max(8, fast_threshold - 10));
     }
 
     features.reserve(std::min(max_features, cell_count * per_cell));
@@ -465,10 +482,22 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
 
     int levels = (int)pyramid_prev_.size();
     if (levels <= 0 || pyramid_curr_.size() != pyramid_prev_.size()) return;
+    debug_input_points = static_cast<int>(features.size());
+    debug_tracked_points = 0;
+    debug_inactive_rejects = 0;
+    debug_geometry_rejects = 0;
+    debug_lk_failures = 0;
+    debug_photometric_rejects = 0;
+    debug_motion_rejects = 0;
     for (auto& f : features) {
-        if (!f.tracked || !std::isfinite(f.x) || !std::isfinite(f.y) ||
+        if (!f.tracked) {
+            ++debug_inactive_rejects;
+            continue;
+        }
+        if (!std::isfinite(f.x) || !std::isfinite(f.y) ||
             f.x < 1.0f || f.x >= width_ - 1.0f ||
             f.y < 1.0f || f.y >= height_ - 1.0f) {
+            ++debug_geometry_rejects;
             f.tracked = false;
             f.dx = 0.0f;
             f.dy = 0.0f;
@@ -513,6 +542,8 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
             // The regional median and support threshold reject remaining
             // isolated outliers before they can become an obstacle alert.
             if (photometric_error > 20.0f || flow_sq > 900.0f) {
+                if (photometric_error > 20.0f) ++debug_photometric_rejects;
+                if (flow_sq > 900.0f) ++debug_motion_rejects;
                 f.dx = 0.0f;
                 f.dy = 0.0f;
                 f.tracked = false;
@@ -523,7 +554,9 @@ void OPTICALFLOW::ComputeFlow(const uint8_t* prev_frame, const uint8_t* curr_fra
             f.x = cx;           
             f.y = cy;
             f.tracked = true;
+            ++debug_tracked_points;
         } else {
+            ++debug_lk_failures;
             f.dx = 0.0f;
             f.dy = 0.0f;
             f.tracked = false;

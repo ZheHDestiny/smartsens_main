@@ -263,12 +263,10 @@ void IMAGEPROCESSOR::MaybePrintRuntimeSummary() {
                recover_successes,
                recover_attempts);
     } else {
-        printf("[PIPE_VERIFY] health=%s quality=%s fps=%.1f p95=%.2fms "
+        printf("[PIPE_VERIFY] health=%s quality=%s "
                "luma=%.1f dark=%.2f bright=%.2f texture=%.1f invalid=%u max_invalid=%u recover=%u/%u fail=%u\n",
                HealthStateName(health_state),
                QualityStateName(quality_state),
-               avg_fps,
-               p95_frame_ms,
                mean_luma,
                dark_ratio,
                bright_ratio,
@@ -383,6 +381,10 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape,
  * @param img_sensor 输出参数：存储从 pipe0 获取的裁剪图像
  */
 void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
+    // Calling GetImage means the preceding frame has completed all business
+    // processing and OSD submission. Finish it before blocking for a sensor
+    // frame so sensor waiting is not misreported as application latency.
+    OfficialPerfFinishPreviousFrame();
     if (!is_opened) {
         if (img_sensor) {
             img_sensor->data = nullptr;
@@ -424,6 +426,7 @@ void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
         }
     } else {
         valid_frames++;
+        OfficialPerfBeginFrame();
         RecordFrameTiming();
         AnalyzeFrameQuality(img_sensor);
         if (invalid_frame_streak > 0) {
@@ -445,6 +448,7 @@ void IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor) {
  * @brief 释放图像处理器资源，关闭 pipeline
  */
 void IMAGEPROCESSOR::Release() {
+    OfficialPerfPrintFinal();
     SigintBlocker sig_blocker;
     if (is_opened) {
         CloseOnlinePipeline(kPipeline0);

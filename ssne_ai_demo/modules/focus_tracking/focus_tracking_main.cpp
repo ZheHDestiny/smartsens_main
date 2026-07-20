@@ -16,6 +16,9 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <cerrno>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "common.hpp"
 #include "motion_guard.hpp"
@@ -1202,6 +1205,38 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     return 0;
 }
 
+static int run_focus_mode_isolated(FocusTrackingMode mode) {
+    malloc_trim(0);
+    std::fflush(nullptr);
+    const pid_t pid = fork();
+    if (pid < 0) {
+        std::perror("[FOCUS_ISOLATION] fork failed");
+        return -1;
+    }
+    if (pid == 0) {
+        g_signal_received.store(false);
+        const char* feature = mode == FocusTrackingMode::NPU_MOBILENET
+            ? "focus_eyedet_s" : (mode == FocusTrackingMode::NPU_FLASH
+                ? "focus_eyedet_flash" : "focus_motion_guard");
+        OfficialPerfReset(feature, 90.0f);
+        const int rc = run_focus_tracking_mode(mode);
+        OfficialPerfPrintFinal();
+        std::fflush(nullptr);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        std::perror("[FOCUS_ISOLATION] waitpid failed");
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        printf("[FOCUS_ISOLATION] worker terminated by signal=%d\n", WTERMSIG(status));
+        return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 int run_focus_tracking() {
     while (!g_signal_received.load()) {
         FocusTrackingMode selected_mode = FocusTrackingMode::NO_NPU_TRACKER;
@@ -1215,7 +1250,7 @@ int run_focus_tracking() {
         // (potentially two-model) mode.
         malloc_trim(0);
         cout << "\n>> 正在启动 [" << focus_mode_name(selected_mode) << "] 子功能...\n";
-        int ret = run_focus_tracking_mode(selected_mode);
+        int ret = run_focus_mode_isolated(selected_mode);
         malloc_trim(0);
         if (g_signal_received.load()) {
             return ret;

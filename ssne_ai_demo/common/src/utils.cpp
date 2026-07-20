@@ -915,9 +915,9 @@ void VISUALIZER::DrawMask(int crop_offset_y, int crop_height) {
 }
 
 void VISUALIZER::DrawAll(const std::vector<FeaturePoint>& features, const ObstacleInfo& obstacle_info, int crop_offset_y, uint32_t frame_count) {
-    (void)features;
     if (!enabled_) return;
     DrawMask(crop_offset_y, 540);
+    DrawFeaturePoints(features, crop_offset_y);
     DrawObstacleRegions(obstacle_info, crop_offset_y, frame_count);
     DrawSafeDirection(obstacle_info, crop_offset_y);
 
@@ -969,7 +969,9 @@ void VISUALIZER::DrawObstacleRegions(const ObstacleInfo& obstacle_info, int crop
 void VISUALIZER::DrawFeaturePoints(const std::vector<FeaturePoint>& features, int crop_offset_y) {
     if (!enabled_) return;
     std::vector<OsdQR> markers;
+    markers.reserve(MAX_FEATURE_MARKERS);
     for (const auto& fp : features) {
+        if (!fp.tracked || !std::isfinite(fp.x) || !std::isfinite(fp.y)) continue;
         float r = 3.0f; 
         float x1 = clampf(fp.x - r, 0, m_width - 1);
         float y1 = clampf(fp.y - r, 0, m_height - 1);
@@ -988,6 +990,7 @@ void VISUALIZER::DrawFeaturePoints(const std::vector<FeaturePoint>& features, in
         q.alpha = fdevice::TYPE_ALPHA100;
         q.type = fdevice::TYPE_HOLLOW;
         markers.emplace_back(q);
+        if (static_cast<int>(markers.size()) >= MAX_FEATURE_MARKERS) break;
     }
     osd_device.Draw(markers, LAYER_FEATURES);
 }

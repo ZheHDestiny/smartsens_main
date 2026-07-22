@@ -92,7 +92,8 @@ public:
 
     void Initialize(int width, int height, const char* bitmap_lut_path = nullptr,
                     int image_dma_size = 0x100000,
-                    uint32_t image_layer_mask = (1u << 2) | (1u << 5));
+                    uint32_t image_layer_mask = (1u << 2) | (1u << 5),
+                    uint32_t layer_creation_mask = (1u << OSD_LAYER_SIZE) - 1u);
     void Release();
     bool IsEnabled() const { return m_osd_enabled; }
 
@@ -104,7 +105,10 @@ public:
 
 private:
     int LoadLutFile(const char* filename);
-    void GenQrangleBox(std::array<float, 4>& det, int border);
+    bool GenQrangleBox(const std::array<float, 4>& det, int border);
+    bool ReserveScanlines(const std::array<float, 4>& det,
+                          std::vector<uint8_t>* scanline_load) const;
+    void AbortLayerSubmission(int layer_id);
 
 private:
     handle_t m_osd_handle = 0;

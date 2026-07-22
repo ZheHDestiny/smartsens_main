@@ -71,6 +71,7 @@ ArduinoFeedback MakeArduinoFeedback(const ObstacleInfo& info) {
 
 ArduinoBridge::ArduinoBridge()
     : fd_(-1),
+      owns_fd_(false),
       sequence_(0),
       last_feedback_{VehicleHint::STOP, 0, 100},
       have_last_feedback_(false),
@@ -110,6 +111,23 @@ bool ArduinoBridge::TryConnect() {
     for (int i = 0; i < attempts; ++i) {
         const char* path = override_path != nullptr && override_path[0] != '\0'
             ? override_path : candidates[i];
+        // PC relay mode uses the console output that is already owned by the
+        // application. Duplicating stdout avoids reopening /dev/ttyS0 and
+        // competing with the shell for one terminal's lifetime and termios.
+        if (std::strcmp(path, "stdout") == 0 || std::strcmp(path, "-") == 0) {
+            const int candidate_fd = dup(STDOUT_FILENO);
+            if (candidate_fd < 0) continue;
+            // dup() shares file-status flags with stdout. Do not enable
+            // O_NONBLOCK here: that would also make ordinary printf output
+            // nonblocking and could silently drop console diagnostics.
+            fcntl(candidate_fd, F_SETFD, FD_CLOEXEC);
+            fd_ = candidate_fd;
+            owns_fd_ = true;
+            device_path_ = "stdout(console relay)";
+            have_last_feedback_ = false;
+            std::printf("[Arduino] 已启用控制台中继输出（不重复打开 ttyS0）\n");
+            return true;
+        }
         const int candidate_fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
         if (candidate_fd < 0) continue;
         // ttyS0 is also the A1 system console in the current image. Its device
@@ -122,6 +140,7 @@ bool ArduinoBridge::TryConnect() {
             continue;
         }
         fd_ = candidate_fd;
+        owns_fd_ = true;
         device_path_ = path;
         have_last_feedback_ = false;
         if (!is_system_console) tcflush(fd_, TCIOFLUSH);
@@ -143,6 +162,10 @@ bool ArduinoBridge::Start() {
 
 bool ArduinoBridge::SendPacket(const ArduinoFeedback& feedback) {
     if (fd_ < 0) return false;
+
+    // Keep normal printf output from being inserted into the middle of the
+    // machine-readable packet when both share the console transport.
+    std::fflush(stdout);
 
     char payload[64];
     const int payload_len = std::snprintf(
@@ -195,12 +218,13 @@ void ArduinoBridge::Update(const ArduinoFeedback& feedback, bool force) {
 void ArduinoBridge::SendStop() {
     const ArduinoFeedback stop = {VehicleHint::STOP, 0, 100};
     Update(stop, true);
-    if (fd_ >= 0) tcdrain(fd_);
+    if (fd_ >= 0 && isatty(fd_)) tcdrain(fd_);
 }
 
 void ArduinoBridge::Close() {
-    if (fd_ >= 0) close(fd_);
+    if (fd_ >= 0 && owns_fd_) close(fd_);
     fd_ = -1;
+    owns_fd_ = false;
     device_path_.clear();
     have_last_feedback_ = false;
 }

@@ -304,7 +304,8 @@ static const char* focus_face_bitmap() {
 void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
                             const std::string& bitmap_lut_path,
                             int image_dma_size,
-                            uint32_t image_layer_mask) {
+                            uint32_t image_layer_mask,
+                            uint32_t layer_creation_mask) {
     m_width = in_img_shape[0];
     m_height = in_img_shape[1];
 
@@ -315,7 +316,7 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
     }
     
     osd_device.Initialize(m_width, m_height, lut_path, image_dma_size,
-                          image_layer_mask);
+                          image_layer_mask, layer_creation_mask);
     enabled_ = osd_device.IsEnabled();
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
@@ -330,7 +331,9 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape,
 }
 
 void VISUALIZER::Release() {
-    if (enabled_) osd_device.Release();
+    // Release also owns partially initialized devices. Checking only enabled_
+    // leaked DMA when every requested layer failed during CMA pressure.
+    osd_device.Release();
     enabled_ = false;
     last_optical_priority_ = -1;
     last_optical_region_ = -1;
@@ -1318,8 +1321,12 @@ int VISUALIZER::HandGestureColor(HandGestureClass g) {
 
 void VISUALIZER::DrawResultLines(int layer_id_primary, int layer_id_secondary, HandGestureClass gesture, const std::array<float, 4>& hand_roi) {
     if (!enabled_) return;
-    
-    int num_lines = static_cast<int>(gesture);
+
+    // Classes are the displayed numbers 0..5. The previous 8-pixel-high
+    // boxes also used border=8, producing a degenerate inner quadrangle. The
+    // common OSD safety guard correctly rejects that geometry. Keep the guard
+    // and submit bars with a valid inner/outer shape instead.
+    const int num_lines = std::max(0, std::min(5, static_cast<int>(gesture)));
     
     std::vector<std::array<float, 4>> boxes_primary;
     std::vector<std::array<float, 4>> boxes_secondary;
@@ -1328,13 +1335,16 @@ void VISUALIZER::DrawResultLines(int layer_id_primary, int layer_id_secondary, H
         float roi_x1 = hand_roi[0];
         float roi_y1 = hand_roi[1];
         float roi_w = hand_roi[2] - hand_roi[0];
-        float line_spacing = 25.f; // 线条间距
-        float line_thickness = 4.f; // 线条厚度
+        const float line_spacing = 25.f;
+        const float line_half_height = 7.f;
 
         for (int i = 0; i < num_lines; ++i) {
             float line_y = roi_y1 - 15.f - line_spacing * i;
             if (line_y < 10.f) line_y = 10.f; 
-            std::array<float, 4> box = {roi_x1 + 20.f, line_y - line_thickness, roi_x1 + roi_w - 20.f, line_y + line_thickness};
+            std::array<float, 4> box = {
+                roi_x1 + 20.f, line_y - line_half_height,
+                roi_x1 + roi_w - 20.f, line_y + line_half_height
+            };
             if (i < 4) {
                 boxes_primary.push_back(box);
             } 
@@ -1343,8 +1353,18 @@ void VISUALIZER::DrawResultLines(int layer_id_primary, int layer_id_secondary, H
             }
         }
     }
-    CommitBoxes(layer_id_primary, 8, C_GESTURE0, boxes_primary);
-    CommitBoxes(layer_id_secondary, 8, C_GESTURE0, boxes_secondary);
+    CommitBoxes(layer_id_primary, 3, C_GESTURE0, boxes_primary);
+    CommitBoxes(layer_id_secondary, 3, C_GESTURE0, boxes_secondary);
+
+    // Class zero has no tally bars, so give it a compact fixed marker. This
+    // also makes a missing result layer distinguishable from a valid zero.
+    if (num_lines == 0) {
+        std::vector<std::array<float, 4>> zero_marker = {{
+            hand_roi[0] + 20.f, hand_roi[1] - 37.f,
+            hand_roi[0] + 62.f, hand_roi[1] - 19.f
+        }};
+        CommitBoxes(layer_id_secondary, 3, C_GESTURE1, zero_marker);
+    }
 }
 
 void VISUALIZER::Draw(const HandGestureResult& result, const std::array<float, 4>& hand_roi) {

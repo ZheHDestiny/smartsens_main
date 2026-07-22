@@ -170,14 +170,15 @@ int run_optical_flow_debug() {
     if (g_signal_received.load()) return 0;
     const bool arduino_enabled = output_mode == OpticalFlowOutputMode::ARDUINO_RELAY;
     if (arduino_enabled) {
-        // uart0 is also the Type-C debug console. The Windows relay filters
-        // @OF packets from ttyS0 and forwards them to the Arduino USB port.
-        if (setenv("A1_ARDUINO_PORT", "/dev/ttyS0", 1) != 0) {
+        // Emit @OF packets through the existing console stdout. Reopening
+        // /dev/ttyS0 in the worker can interfere with shell wakeup/reset and
+        // makes its teardown race the long-lived console owner.
+        if (setenv("A1_ARDUINO_PORT", "stdout", 1) != 0) {
             std::perror("[Arduino] 无法设置 A1_ARDUINO_PORT");
             return -1;
         }
         printf("[输出模式] Arduino 电脑中继模式\n");
-        printf("  • 已在程序内设置 A1_ARDUINO_PORT=/dev/ttyS0\n");
+        printf("  • @OF 数据复用控制台 stdout，不重复打开 /dev/ttyS0\n");
         printf("  • 请保持 Windows 中继脚本运行并占用 A1/Arduino 两个串口\n\n");
     } else {
         printf("[输出模式] 标准光流模式（不打开 Arduino 串口）\n\n");
@@ -225,7 +226,10 @@ int run_optical_flow_debug() {
     if (osd_present) {
         // This mode uses only a compact status bitmap, not a full-screen RLE
         // texture. Smaller image buffers avoid OSD CMA fragmentation.
-        visualizer.Initialize(img_shape, "", 0x20000);
+        visualizer.Initialize(img_shape, "", 0x20000,
+                              (1u << 2),
+                              (1u << 0) | (1u << 1) | (1u << 2) |
+                              (1u << 3) | (1u << 4));
         printf("  ✓ OSD 可视化器初始化完成\n\n");
     }
 

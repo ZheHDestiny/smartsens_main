@@ -79,7 +79,8 @@ int run_face_detection() {
     FaceDetectionResult* det_result = new FaceDetectionResult;
 
     VISUALIZER visualizer;
-    visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000,
+                          0u, (1u << 0));
 
     usleep(200000);
 

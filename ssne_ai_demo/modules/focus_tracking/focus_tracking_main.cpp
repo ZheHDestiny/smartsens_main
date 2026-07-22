@@ -583,7 +583,12 @@ static int run_focus_tracking_mode(FocusTrackingMode selected_mode) {
     // VISUALIZER itself reports a precise initialization failure if OSD is off.
     // This mode only uses small RLE status sprites; do not reserve the menu's
     // 1 MiB-per-image-layer OCM budget on the constrained A1 board.
-    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000);
+    const uint32_t focus_layer_mask = eye_face_mode
+        ? ((1u << 6) - 1u)
+        : ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000,
+                          (1u << 2) | (eye_face_mode ? (1u << 5) : 0u),
+                          focus_layer_mask);
     const std::array<float, 4> focus_fov = {
         static_cast<float>(crop_x1), static_cast<float>(crop_y1),
         static_cast<float>(crop_x2 - 1), static_cast<float>(crop_y2 - 1)};

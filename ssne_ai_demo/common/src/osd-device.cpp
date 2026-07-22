@@ -8,6 +8,7 @@
 #include <fstream>
 #include <cstring>
 #include <cerrno>
+#include <cmath>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -41,7 +42,8 @@ OsdDevice::~OsdDevice() {
 
 void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
                            int image_dma_size,
-                           uint32_t image_layer_mask) {
+                           uint32_t image_layer_mask,
+                           uint32_t layer_creation_mask) {
     SigintBlocker sig_blocker;
     if (m_device_opened || m_osd_enabled) {
         Release();
@@ -68,13 +70,39 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
     }
 
     m_osd_handle = osd_open_device();
+    if (m_osd_handle == INVALID_HANDLE) {
+        std::cerr << "[OsdDevice] Error: osd_open_device failed, disabling OSD."
+                  << std::endl;
+        delete[] m_pcolor_lut;
+        m_pcolor_lut = nullptr;
+        m_osd_enabled = false;
+        m_device_opened = false;
+        return;
+    }
     m_device_opened = true;
-    osd_init_device(m_osd_handle, OSD_LAYER_SIZE, (char*)m_pcolor_lut);
+    const int init_ret = osd_init_device(
+        m_osd_handle, OSD_LAYER_SIZE, (char*)m_pcolor_lut);
+    if (init_ret != 0) {
+        std::cerr << "[OsdDevice] Error: osd_init_device failed ret="
+                  << init_ret << ", disabling OSD." << std::endl;
+        osd_close_device(m_osd_handle);
+        m_osd_handle = INVALID_HANDLE;
+        m_device_opened = false;
+        delete[] m_pcolor_lut;
+        m_pcolor_lut = nullptr;
+        m_osd_enabled = false;
+        return;
+    }
     m_osd_enabled = true;
 
     for (int layer_index = 0; layer_index < OSD_LAYER_SIZE; layer_index++) {
+        m_layer_created[layer_index] = false;
         m_layer_has_content[layer_index] = false;
         m_layer_add_failures[layer_index] = 0;
+        m_layer_dma[layer_index] = fdevice::DMA_BUFFER_ATTR_S();
+        if ((layer_creation_mask & (1u << layer_index)) == 0u) {
+            continue;
+        }
         // Vector text and multiple tracking boxes can exceed the historical
         // 1 KiB graphic-layer buffer.  This allocation is initialization-only.
         const bool is_image_layer =
@@ -92,10 +120,35 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
             dma_size = std::max(0x1000, std::min(image_dma_size, 0x20000));
         }
         
-        osd_alloc_buffer(m_osd_handle, m_layer_dma[layer_index].dma, dma_size);
-        usleep(250000); // 等待 DMA 分配稳定
-        osd_alloc_buffer(m_osd_handle, m_layer_dma[layer_index].dma_2, dma_size);
+        const int alloc0_ret = osd_alloc_buffer(
+            m_osd_handle, m_layer_dma[layer_index].dma, dma_size);
+        if (alloc0_ret != 0 || m_layer_dma[layer_index].dma == nullptr) {
+            std::cerr << "[OsdDevice] Warning: first DMA allocation failed for layer "
+                      << layer_index << " ret=" << alloc0_ret
+                      << ", layer disabled." << std::endl;
+            continue;
+        }
+        usleep(20000);
+        const int alloc1_ret = osd_alloc_buffer(
+            m_osd_handle, m_layer_dma[layer_index].dma_2, dma_size);
+        if (alloc1_ret != 0 || m_layer_dma[layer_index].dma_2 == nullptr) {
+            std::cerr << "[OsdDevice] Warning: second DMA allocation failed for layer "
+                      << layer_index << " ret=" << alloc1_ret
+                      << ", layer disabled." << std::endl;
+            osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma);
+            m_layer_dma[layer_index].dma = nullptr;
+            continue;
+        }
         int dma_fd = osd_get_buffer_fd(m_osd_handle, m_layer_dma[layer_index].dma);
+        if (dma_fd < 0) {
+            std::cerr << "[OsdDevice] Warning: invalid DMA fd for layer "
+                      << layer_index << ", layer disabled." << std::endl;
+            osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma);
+            osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma_2);
+            m_layer_dma[layer_index].dma = nullptr;
+            m_layer_dma[layer_index].dma_2 = nullptr;
+            continue;
+        }
 
         // osd_create_layer() requires every member to be initialized.  In
         // particular, sensor_flag and the inactive encoder descriptor must
@@ -126,10 +179,26 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
         int cret = osd_create_layer(m_osd_handle, (ssLAYER_HANDLE)layer_index, &osd_layer);
         if (cret == 0) {
             m_layer_created[layer_index] = true;
-            osd_set_layer_buffer(m_osd_handle, (ssLAYER_HANDLE)layer_index, m_layer_dma[layer_index]);
+            const int sret = osd_set_layer_buffer(
+                m_osd_handle, (ssLAYER_HANDLE)layer_index,
+                m_layer_dma[layer_index]);
+            if (sret != 0) {
+                std::cerr << "[OsdDevice] Warning: set layer buffer failed for layer "
+                          << layer_index << " ret=" << sret << std::endl;
+                osd_destroy_layer(m_osd_handle, (ssLAYER_HANDLE)layer_index);
+                m_layer_created[layer_index] = false;
+                osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma);
+                osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma_2);
+                m_layer_dma[layer_index].dma = nullptr;
+                m_layer_dma[layer_index].dma_2 = nullptr;
+            }
         } else {
             std::cerr << "[OsdDevice] Warning: osd_create_layer failed for layer " << layer_index << " ret=" << cret << std::endl;
             m_layer_created[layer_index] = false;
+            osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma);
+            osd_delete_buffer(m_osd_handle, m_layer_dma[layer_index].dma_2);
+            m_layer_dma[layer_index].dma = nullptr;
+            m_layer_dma[layer_index].dma_2 = nullptr;
         }
     }
 
@@ -139,12 +208,23 @@ void OsdDevice::Initialize(int width, int height, const char* bitmap_lut_path,
     }
     if (!any_created) {
         std::cerr << "[OsdDevice] Warning: no OSD layers created, disabling OSD." << std::endl;
-        m_osd_enabled = false;
+        Release();
     }
 }
 
 void OsdDevice::Release() {
     SigintBlocker sig_blocker;
+    // Remove scanout commands before their backing DMA is destroyed. This is
+    // essential on A1: destroying a layer that is still referenced by the OSD
+    // engine leaves stale scanlines (snow) and can race the next owner.
+    for (int i = 0; i < OSD_LAYER_SIZE; ++i) {
+        if (m_layer_created[i]) {
+            osd_clean_layer(m_osd_handle, (ssLAYER_HANDLE)i);
+            m_layer_has_content[i] = false;
+        }
+    }
+    usleep(40000);
+
     for(int i = 0; i < OSD_LAYER_SIZE; i++){
         if (m_layer_created[i]) {
             osd_destroy_layer(m_osd_handle, (ssLAYER_HANDLE)i);
@@ -162,18 +242,49 @@ void OsdDevice::Release() {
         m_layer_add_failures[i] = 0;
     }
 
-    if(m_pcolor_lut != nullptr){
-        delete[] m_pcolor_lut;
-        m_pcolor_lut = nullptr;
-    }
-
     if (m_device_opened) {
         osd_close_device(m_osd_handle);
         m_device_opened = false;
     }
+    // osd_init_device() receives this pointer. Keep it alive until after the
+    // device is closed even if current firmware copies the LUT internally.
+    if(m_pcolor_lut != nullptr){
+        delete[] m_pcolor_lut;
+        m_pcolor_lut = nullptr;
+    }
     m_osd_enabled = false;
     m_osd_handle = 0; // 重置为无效句柄，防止 dangling handle
-    usleep(300000); // 等待驱动完成资源清理
+    usleep(80000);
+}
+
+void OsdDevice::AbortLayerSubmission(int layer_id) {
+    if (layer_id < 0 || layer_id >= OSD_LAYER_SIZE ||
+        !m_layer_created[layer_id]) return;
+    // An add/flush failure may leave a partial command list even when the
+    // first primitive failed. Always clean instead of trusting local state.
+    osd_clean_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    m_layer_has_content[layer_id] = false;
+}
+
+bool OsdDevice::ReserveScanlines(
+        const std::array<float, 4>& det,
+        std::vector<uint8_t>* scanline_load) const {
+    if (scanline_load == nullptr || scanline_load->size() !=
+            static_cast<size_t>(m_height) ||
+        !std::isfinite(det[1]) || !std::isfinite(det[3])) {
+        return false;
+    }
+    const int y0 = std::max(0, std::min(m_height - 1,
+        static_cast<int>(std::floor(std::min(det[1], det[3])))));
+    const int y1 = std::max(0, std::min(m_height - 1,
+        static_cast<int>(std::ceil(std::max(det[1], det[3])))));
+    for (int y = y0; y <= y1; ++y) {
+        if ((*scanline_load)[static_cast<size_t>(y)] >= 4u) return false;
+    }
+    for (int y = y0; y <= y1; ++y) {
+        ++(*scanline_load)[static_cast<size_t>(y)];
+    }
+    return true;
 }
 
 int OsdDevice::LoadLutFile(const char* filename){
@@ -230,8 +341,10 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle> &quad_rangle){
         return;
     }
 
+    std::vector<uint8_t> scanline_load(static_cast<size_t>(m_height), 0u);
     for(auto &q : quad_rangle){
-        GenQrangleBox(q.box, q.border);
+        if (!ReserveScanlines(q.box, &scanline_load)) continue;
+        if (!GenQrangleBox(q.box, q.border)) continue;
         COVER_ATTR_S qrangle_attr = {q.color, q.type, q.alpha, m_qrangle_out, m_qrangle_in};
         osd_add_quad_rangle(m_osd_handle, &qrangle_attr);
     }
@@ -252,19 +365,19 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id){
     // previous command list before adding new quadrangles.  Without this,
     // gesture/RPS modes append several primitives at camera rate until the OSD
     // command buffer corrupts the displayed scanlines or driver state.
-    if (m_layer_has_content[layer_id]) {
-        const int clear_ret = osd_clean_layer(
-            m_osd_handle, (ssLAYER_HANDLE)layer_id);
-        if (clear_ret != 0) {
-            std::cerr << "[OsdDevice] ERROR: clear quadrangle layer failed, layer="
-                      << layer_id << " ret=" << clear_ret << std::endl;
-            return;
-        }
-        m_layer_has_content[layer_id] = false;
+    const int clear_ret = osd_clean_layer(
+        m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    if (clear_ret != 0) {
+        std::cerr << "[OsdDevice] ERROR: clear quadrangle layer failed, layer="
+                  << layer_id << " ret=" << clear_ret << std::endl;
+        return;
     }
+    m_layer_has_content[layer_id] = false;
 
+    std::vector<uint8_t> scanline_load(static_cast<size_t>(m_height), 0u);
     for(auto &q : quad_rangle){
-        GenQrangleBox(q.box, q.border);
+        if (!ReserveScanlines(q.box, &scanline_load)) continue;
+        if (!GenQrangleBox(q.box, q.border)) continue;
         COVER_ATTR_S qrangle_attr = {q.color, q.type, q.alpha, m_qrangle_out, m_qrangle_in};
         const int ret = osd_add_quad_rangle_layer(
             m_osd_handle, (ssLAYER_HANDLE)layer_id, &qrangle_attr);
@@ -275,15 +388,22 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id){
                           << layer_id << " ret=" << ret
                           << " consecutive=" << failures << std::endl;
             }
+            AbortLayerSubmission(layer_id);
             return;
         }
         m_layer_has_content[layer_id] = true;
+    }
+    if (!m_layer_has_content[layer_id]) {
+        m_layer_add_failures[layer_id] = 0;
+        return;
     }
     const int flush_ret = osd_flush_quad_rangle_layer(
         m_osd_handle, (ssLAYER_HANDLE)layer_id);
     if (flush_ret != 0) {
         std::cerr << "[OsdDevice] ERROR: flush quadrangle failed, layer="
                   << layer_id << " ret=" << flush_ret << std::endl;
+        AbortLayerSubmission(layer_id);
+        return;
     }
     m_layer_add_failures[layer_id] = 0;
 }
@@ -309,19 +429,19 @@ void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int l
         return;
     }
 
-    if (m_layer_has_content[layer_id]) {
-        const int clear_ret = osd_clean_layer(
-            m_osd_handle, (ssLAYER_HANDLE)layer_id);
-        if (clear_ret != 0) {
-            std::cerr << "[OsdDevice] ERROR: clear quadrangle layer failed, layer="
-                      << layer_id << " ret=" << clear_ret << std::endl;
-            return;
-        }
-        m_layer_has_content[layer_id] = false;
+    const int clear_ret = osd_clean_layer(
+        m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    if (clear_ret != 0) {
+        std::cerr << "[OsdDevice] ERROR: clear quadrangle layer failed, layer="
+                  << layer_id << " ret=" << clear_ret << std::endl;
+        return;
     }
+    m_layer_has_content[layer_id] = false;
 
+    std::vector<uint8_t> scanline_load(static_cast<size_t>(m_height), 0u);
     for (auto &box : boxes){
-        GenQrangleBox(box, border);
+        if (!ReserveScanlines(box, &scanline_load)) continue;
+        if (!GenQrangleBox(box, border)) continue;
         COVER_ATTR_S qrangle_attr = {color, type, alpha, m_qrangle_out, m_qrangle_in};
         const int ret = osd_add_quad_rangle_layer(
             m_osd_handle, (ssLAYER_HANDLE)layer_id, &qrangle_attr);
@@ -332,15 +452,22 @@ void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes, int border, int l
                           << layer_id << " ret=" << ret
                           << " consecutive=" << failures << std::endl;
             }
+            AbortLayerSubmission(layer_id);
             return;
         }
         m_layer_has_content[layer_id] = true;
+    }
+    if (!m_layer_has_content[layer_id]) {
+        m_layer_add_failures[layer_id] = 0;
+        return;
     }
     const int flush_ret = osd_flush_quad_rangle_layer(
         m_osd_handle, (ssLAYER_HANDLE)layer_id);
     if (flush_ret != 0) {
         std::cerr << "[OsdDevice] ERROR: flush quadrangle failed, layer="
                   << layer_id << " ret=" << flush_ret << std::endl;
+        AbortLayerSubmission(layer_id);
+        return;
     }
     m_layer_add_failures[layer_id] = 0;
 }
@@ -357,26 +484,27 @@ void OsdDevice::DrawTexture(const char* bitmap_path, const char* lut_path, int l
         return;
     }
 
-    fdevice::BITMAP_INFO_S bm_info;
+    // Keep every reserved field deterministic; the driver may retain this
+    // descriptor until the next layer update.
+    fdevice::BITMAP_INFO_S bm_info = {};
     bm_info.pSSbmpFile = bitmap_path;
     bm_info.alpha = alpha;
     bm_info.position.x = pos_x;
     bm_info.position.y = pos_y;
 
-    if (m_layer_has_content[layer_id]) {
-        const int clear_ret = osd_clean_layer(
-            m_osd_handle, (ssLAYER_HANDLE)layer_id);
-        if (clear_ret != 0) {
-            std::cerr << "[OsdDevice] ERROR: clear texture layer failed, layer="
-                      << layer_id << " ret=" << clear_ret << std::endl;
-            return;
-        }
-        m_layer_has_content[layer_id] = false;
+    const int clear_ret = osd_clean_layer(
+        m_osd_handle, (ssLAYER_HANDLE)layer_id);
+    if (clear_ret != 0) {
+        std::cerr << "[OsdDevice] ERROR: clear texture layer failed, layer="
+                  << layer_id << " ret=" << clear_ret << std::endl;
+        return;
     }
+    m_layer_has_content[layer_id] = false;
 
     int ret = osd_add_texture_layer(m_osd_handle, (ssLAYER_HANDLE)layer_id, &bm_info);
     if (ret != 0) {
         std::cerr << "[OsdDevice] ERROR: osd_add_texture_layer failed! layer_id=" << layer_id << std::endl;
+        AbortLayerSubmission(layer_id);
         return;
     }
     m_layer_has_content[layer_id] = true;
@@ -385,29 +513,52 @@ void OsdDevice::DrawTexture(const char* bitmap_path, const char* lut_path, int l
     if (flush_ret != 0) {
         std::cerr << "[OsdDevice] ERROR: flush texture failed, layer="
                   << layer_id << " ret=" << flush_ret << std::endl;
+        AbortLayerSubmission(layer_id);
     }
 }
 
-void OsdDevice::GenQrangleBox(std::array<float, 4>& det, int border){
+bool OsdDevice::GenQrangleBox(const std::array<float, 4>& det, int border){
+    if (m_width <= 1 || m_height <= 1 ||
+        !std::isfinite(det[0]) || !std::isfinite(det[1]) ||
+        !std::isfinite(det[2]) || !std::isfinite(det[3])) {
+        return false;
+    }
+
+    const int max_x = m_width - 1;
+    const int max_y = m_height - 1;
+    const int x1 = std::max(0, std::min(max_x,
+        static_cast<int>(std::floor(std::min(det[0], det[2])))));
+    const int y1 = std::max(0, std::min(max_y,
+        static_cast<int>(std::floor(std::min(det[1], det[3])))));
+    const int x2 = std::max(0, std::min(max_x,
+        static_cast<int>(std::ceil(std::max(det[0], det[2])))));
+    const int y2 = std::max(0, std::min(max_y,
+        static_cast<int>(std::ceil(std::max(det[1], det[3])))));
+    border = std::max(0, border);
+    if (x2 - x1 < std::max(1, border * 2 + 1) ||
+        y2 - y1 < std::max(1, border * 2 + 1)) {
+        return false;
+    }
+
     std::array<int, 16> box;
 
-    box[0] = std::min(m_width, std::max(0, int(det[0]+border)));
-    box[1] = std::min(m_height, std::max(0, int(det[1]+border)));
-    box[2] = std::min(m_width, std::max(0, int(det[0]+border)));
-    box[3] = std::min(m_height, std::max(0, int(det[3]-border)));
-    box[4] = std::min(m_width, std::max(0, int(det[2]-border)));
-    box[5] = std::min(m_height, std::max(0, int(det[3]-border)));
-    box[6] = std::min(m_width, std::max(0, int(det[2]-border)));
-    box[7] = std::min(m_height, std::max(0, int(det[1]+border)));
+    box[0] = std::min(max_x, x1 + border);
+    box[1] = std::min(max_y, y1 + border);
+    box[2] = std::min(max_x, x1 + border);
+    box[3] = std::max(0, y2 - border);
+    box[4] = std::max(0, x2 - border);
+    box[5] = std::max(0, y2 - border);
+    box[6] = std::max(0, x2 - border);
+    box[7] = std::min(max_y, y1 + border);
 
-    box[8] = std::min(m_width, std::max(0, int(det[0]-border)));
-    box[9] = std::min(m_height, std::max(0, int(det[1]-border)));
-    box[10] = std::min(m_width, std::max(0, int(det[0]-border)));
-    box[11] = std::min(m_height, std::max(0, int(det[3]+border)));
-    box[12] = std::min(m_width, std::max(0, int(det[2]+border)));
-    box[13] = std::min(m_height, std::max(0, int(det[3]+border)));
-    box[14] = std::min(m_width, std::max(0, int(det[2]+border)));
-    box[15] = std::min(m_height, std::max(0, int(det[1]-border)));
+    box[8] = std::max(0, x1 - border);
+    box[9] = std::max(0, y1 - border);
+    box[10] = std::max(0, x1 - border);
+    box[11] = std::min(max_y, y2 + border);
+    box[12] = std::min(max_x, x2 + border);
+    box[13] = std::min(max_y, y2 + border);
+    box[14] = std::min(max_x, x2 + border);
+    box[15] = std::max(0, y1 - border);
 
     m_qrangle_in.points[0]={box[0], box[1]};
     m_qrangle_in.points[1]={box[2], box[3]};
@@ -417,6 +568,7 @@ void OsdDevice::GenQrangleBox(std::array<float, 4>& det, int border){
     m_qrangle_out.points[1] = {box[10], box[11]};
     m_qrangle_out.points[2] = {box[12], box[13]};
     m_qrangle_out.points[3] = {box[14], box[15]};
+    return true;
 }
 
 } // namespace osd

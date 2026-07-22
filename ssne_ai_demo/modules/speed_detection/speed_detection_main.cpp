@@ -148,7 +148,8 @@ int run_speed_detection() {
 
     VISUALIZER visualizer;
     array<int, 2> osd_shape = {720, 1280};
-    visualizer.Initialize(osd_shape, "shared_colorLUT.sscl");
+    visualizer.Initialize(osd_shape, "shared_colorLUT.sscl", 0x20000,
+                          0u, (1u << 0) | (1u << 4));
 
     ObjectDetectionResult det_result;
     std::thread listener_thread(keyboard_listener);

@@ -33,7 +33,8 @@ public:
     void Initialize(std::array<int, 2>& in_img_shape,
                     const std::string& bitmap_lut_path = "",
                     int image_dma_size = 0x100000,
-                    uint32_t image_layer_mask = (1u << 2) | (1u << 5));
+                    uint32_t image_layer_mask = (1u << 2) | (1u << 5),
+                    uint32_t layer_creation_mask = (1u << OSD_LAYER_SIZE) - 1u);
     void Release();
     void Clear();
 
@@ -96,7 +97,13 @@ private:
     static const int LAYER_MASK      = 4; 
     static const int LAYER_FACE_ICON = 5;
 
-    static const int MAX_FEATURE_MARKERS = 24;
+    // The A1 quadrangle command FIFO is small. Keep the diagnostic feature
+    // layer below its practical per-flush limit; obstacle semantics use
+    // separate layers and are unaffected by this cap.
+    // Vendor OSD contract: one scanline supports at most four convex quads.
+    // Feature markers can share a scanline, so four total is the only bound
+    // that is valid for arbitrary feature geometry.
+    static const int MAX_FEATURE_MARKERS = 4;
     static const int MAX_FLOW_ARROWS     = 10;
     
     void DrawFeaturePoints(const std::vector<FeaturePoint>& features, int crop_offset_y);

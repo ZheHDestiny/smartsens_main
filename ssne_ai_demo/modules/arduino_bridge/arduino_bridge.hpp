@@ -44,6 +44,7 @@ private:
     bool SendPacket(const ArduinoFeedback& feedback);
 
     int fd_;
+    bool owns_fd_;
     uint32_t sequence_;
     std::string device_path_;
     ArduinoFeedback last_feedback_;

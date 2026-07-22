@@ -78,7 +78,8 @@ int run_facial_expressions() {
     VISUALIZER visualizer;
     // Emotion icons are compact; two full 1 MiB RLE buffers unnecessarily
     // consume most of the A1 board's free CMA/anonymous-memory headroom.
-    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000);
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000,
+                          (1u << 2), (1u << 0) | (1u << 2));
 
     usleep(200000);
 

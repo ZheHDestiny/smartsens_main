@@ -94,7 +94,8 @@ int run_object_detection() {
 
     ObjectDetectionResult det_result;
     VISUALIZER visualizer;
-    visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+    visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x20000,
+                          0u, (1u << 0));
 
     std::thread listener_thread(keyboard_listener);
     ssne_tensor_t img_sensor;

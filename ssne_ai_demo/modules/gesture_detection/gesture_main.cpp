@@ -102,7 +102,8 @@ int run_gesture_detection() {
     VISUALIZER visualizer;
     // Gesture OSD uses only vector layers 0/1/3. Avoid reserving the menu's
     // full-screen 1 MiB RLE pair in this long-running mode.
-    visualizer.Initialize(img_shape, "", 0x20000);
+    visualizer.Initialize(img_shape, "", 0x20000, 0u,
+                          (1u << 0) | (1u << 1) | (1u << 3));
 
     usleep(200000);
 

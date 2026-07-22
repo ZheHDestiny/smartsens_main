@@ -184,7 +184,10 @@ int main(int argc, char** argv) {
         
         clear_stdin_residual();
         
-        menu_visualizer.Initialize(img_shape, "shared_colorLUT.sscl");
+        // The menu only draws one full-screen bitmap. Creating five unused
+        // layers consumed and fragmented scarce OSD CMA on every menu return.
+        menu_visualizer.Initialize(img_shape, "shared_colorLUT.sscl", 0x100000,
+                                   (1u << 2), (1u << 2));
         
         menu_visualizer.DrawBitmap("background.ssbmp", "shared_colorLUT.sscl", 0, 0, 2);
 
@@ -253,7 +256,11 @@ int main(int argc, char** argv) {
                 break;
             case 8:
                 std::cout << "\n>> 进入 [追焦功能] 子菜单...\n";
-                run_module_isolated("focus_tracking", run_focus_tracking);
+                // Focus modes already have their own worker boundary. Avoid
+                // nesting fork() here: nested workers duplicated the submenu
+                // runtime/stdio state and made abnormal mode exits propagate
+                // as heap/driver corruption in the outer worker.
+                run_focus_tracking();
                 std::cout << "\n>> 已离开 [追焦功能]，返回主菜单。\n";
                 break;
             case 0:
